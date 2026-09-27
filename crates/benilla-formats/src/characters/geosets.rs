@@ -17,6 +17,21 @@ const REGION_BASES: [u16; 16] = [
     1, 101, 201, 301, 401, 501, 601, 702, 801, 901, 1001, 1101, 1201, 1301, 1401, 1501,
 ];
 
+/// The geosets a character shows: the selector's picks, plus every ID above 1700. `0x477520` first
+/// disables only 0..=1700 (`0x6a4`, through `0x7110d0`) and then enables its picks, and a model's
+/// submeshes start visible (`0x70ebd0` fills their flags with 1), so a higher ID stays shown.
+#[derive(Debug)]
+pub struct VisibleGeosets {
+    selected: Vec<u16>,
+}
+
+impl VisibleGeosets {
+    /// Whether a model submesh survives the character compositor's geoset selection.
+    pub fn contains(&self, geoset_id: &u16) -> bool {
+        *geoset_id > 1700 || self.selected.contains(geoset_id)
+    }
+}
+
 /// The customization → geoset tables, resolving an appearance to the set of visible geosets.
 pub struct CharacterGeosets {
     /// (race, sex, hairStyle) → hair `GeosetID` (group 0).
@@ -47,7 +62,8 @@ pub struct EquipGeosets {
 
 impl CharacterGeosets {
     /// The geosets (`skinSectionId`s) this appearance draws, sorted and deduplicated: the naked
-    /// set, then the eight equipment branches B1–B8 of `0x477520`.
+    /// set, then the eight equipment branches B1–B8 of `0x477520`. Use
+    /// [`VisibleGeosets::contains`] to retain unmanaged IDs above 1700.
     pub fn visible_geosets(
         &self,
         race: u8,
@@ -55,7 +71,7 @@ impl CharacterGeosets {
         hair_style: u8,
         facial_hair: u8,
         equip: &EquipGeosets,
-    ) -> Vec<u16> {
+    ) -> VisibleGeosets {
         // The naked set: the region bases and geoset 0, the body.
         let mut set = REGION_BASES.to_vec();
         set.push(0);
@@ -158,7 +174,7 @@ impl CharacterGeosets {
         // The client sets a flag per submesh (`0x7110d0`), so a repeated enable is a no-op there.
         set.sort_unstable();
         set.dedup();
-        set
+        VisibleGeosets { selected: set }
     }
 
     /// Load the customization DBCs from the patch chain. A repeated `(race, sex, variation)` key
@@ -286,6 +302,71 @@ pub(crate) fn char_facial_hair_schema() -> Schema {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geoset_visibility_preserves_unmanaged_ids() {
+        let cg = CharacterGeosets {
+            hair: HashMap::new(),
+            facial: HashMap::new(),
+            helmet_vis: HashMap::new(),
+        };
+        let mut boots = EquipGeosets::default();
+        boots.bodyslots[4] = Some([2, 0, 0]);
+        for equip in [EquipGeosets::default(), boots] {
+            let visible = cg.visible_geosets(4, 1, 0, 0, &equip);
+            assert!(
+                visible.contains(&0),
+                "stock eye glow stays on the body geoset"
+            );
+            for id in [2, 302, 1600, 1699, 1700] {
+                assert!(!visible.contains(&id), "unselected managed geoset {id}");
+            }
+            for id in [1701, 1702, 2001, u16::MAX] {
+                assert!(visible.contains(&id), "unmanaged geoset {id} stays visible");
+            }
+        }
+        let visible = cg.visible_geosets(4, 1, 0, 0, &boots);
+        assert!(!visible.contains(&501), "boots still hide the bare ankle");
+        assert!(
+            visible.contains(&503),
+            "the equipped boot variant is visible"
+        );
+    }
+
+    /// Both Night Elf sexes carry two eye-glow cards (on geoset 0 in the stock data; an asset pack
+    /// may put them above 1700), and both survive the selection, bare and robed.
+    #[test]
+    fn geoset_visibility_keeps_night_elf_eye_glow() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cg = CharacterGeosets::load(&mut chain).expect("load customization tables");
+        for (sex, name) in [(0, "Male"), (1, "Female")] {
+            let path = format!("Character\\NightElf\\{name}\\NightElf{name}.m2");
+            let parts = crate::load_m2_mesh(&mut chain, &path).expect("Night Elf model");
+            let eyes: Vec<_> = parts
+                .iter()
+                .filter(|p| {
+                    p.texture
+                        .as_ref()
+                        .is_some_and(|t| t.to_ascii_lowercase().ends_with("eyeglow.blp"))
+                })
+                .collect();
+            assert_eq!(eyes.len(), 2, "{name} has two eye-glow cards");
+            assert!(eyes.iter().all(|p| p.billboard.is_some() && p.additive));
+            let mut robe = EquipGeosets::default();
+            robe.bodyslots[1] = Some([0, 0, 1]);
+            for equip in [EquipGeosets::default(), robe] {
+                let visible = cg.visible_geosets(4, sex, 0, 0, &equip);
+                assert_eq!(
+                    eyes.iter()
+                        .filter(|p| visible.contains(&p.geoset_id))
+                        .count(),
+                    2,
+                    "{name}: both eye-glow cards must survive the character filter"
+                );
+            }
+        }
+    }
 
     /// Gloves, boots, a robe and a cloak replace their groups; a robe hides the tabard flap.
     #[test]
