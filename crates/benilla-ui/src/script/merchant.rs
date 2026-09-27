@@ -66,6 +66,15 @@ pub struct ItemStatsHead {
     pub sell_price: u32,
 }
 
+/// Each damaged item's repair cost in copper after the vendor's discount (`0x4faf30`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RepairCosts {
+    /// Equipped items by live inventory id.
+    pub equipped: std::collections::HashMap<u32, u32>,
+    /// Container items by `(bag, slot)`: bags 0-4, the bank vault -1 and bank bags 5-10.
+    pub bags: std::collections::HashMap<(i64, u32), u32>,
+}
+
 /// One open merchant window, pushed whole by the app; `None` means no vendor is open.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MerchantState {
@@ -92,6 +101,11 @@ impl super::UiScript {
     /// Push `GetRepairAllCost`'s total in copper, swept by the app ahead of the events that read it.
     pub fn set_repair_all_cost(&mut self, copper: u32) {
         self.model_mut().repair_all_cost = copper;
+    }
+
+    /// Push the repair costs the item tooltip bindings return.
+    pub fn set_repair_costs(&mut self, costs: RepairCosts) {
+        self.model_mut().repair_costs = costs;
     }
 
     /// Drain the `(row, quantity)` buys `BuyMerchantItem` queued, the row 1-based.

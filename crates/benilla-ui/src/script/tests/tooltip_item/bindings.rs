@@ -650,3 +650,102 @@ fn set_merchant_compare_item_answers_one_or_nil_per_candidate_slot() {
         "number"
     );
 }
+
+/// Both bindings return the pushed cost, a vault item's through either; no cost, an empty slot
+/// and an inspected unit's item answer 0.
+#[test]
+fn item_bindings_return_the_pushed_repair_cost() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    let mut inv: InventorySlots = Default::default();
+    inv[16] = Some(InvSlotView {
+        item_id: 8200,
+        name: Some("Worn Blade".into()),
+        quality: 2,
+        ..Default::default()
+    });
+    s.set_inventory_slots(inv.clone());
+    s.set_inspect(Some(InspectView {
+        unit: "target".into(),
+        guid: 0x42,
+        slots: inv,
+    }));
+    let mut slots = HashMap::new();
+    for (slot, id, name) in [(1, 8201, "Worn Helm"), (2, 8202, "Whole Helm")] {
+        slots.insert(
+            slot,
+            ContainerSlot {
+                item_id: id,
+                count: 1,
+                quality: Some(2),
+                link: Some(format!("|cff1eff00|Hitem:{id}:0:0:0|h[{name}]|h|r")),
+                ..Default::default()
+            },
+        );
+    }
+    let vault = HashMap::from([(
+        3,
+        ContainerSlot {
+            item_id: 8201,
+            count: 1,
+            quality: Some(2),
+            link: Some("|cff1eff00|Hitem:8201:0:0:0|h[Worn Helm]|h|r".into()),
+            ..Default::default()
+        },
+    )]);
+    for (bag, name, slots) in [(0, "Backpack", slots), (-1, "Bank", vault)] {
+        s.set_container(
+            bag,
+            Some(ContainerState {
+                name: Some(name.into()),
+                num_slots: 24,
+                slots,
+            }),
+        );
+    }
+    for (id, name) in [
+        (8200, "Worn Blade"),
+        (8201, "Worn Helm"),
+        (8202, "Whole Helm"),
+    ] {
+        s.set_item_template(
+            id,
+            ItemTemplateView {
+                name: name.into(),
+                quality: 2,
+                ..Default::default()
+            },
+        );
+    }
+    let mut costs = RepairCosts::default();
+    costs.equipped.insert(16, 1234);
+    costs.bags.insert((0, 1), 567);
+    costs.bags.insert((-1, 3), 89);
+    s.set_repair_costs(costs);
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0)
+        a:SetWidth(10); a:SetHeight(10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        local has, _, cost = tt:SetInventoryItem("player", 16)
+        assert(has == 1 and cost == 1234, "equipped: " .. tostring(cost))
+        local _, _, upper = tt:SetInventoryItem("PLAYER", 16)
+        assert(upper == 1234, "the token matches case-blind: " .. tostring(upper))
+        local _, _, empty = tt:SetInventoryItem("player", 15)
+        assert(empty == 0, "an empty slot still pushes 0")
+        local seen, _, theirs = tt:SetInventoryItem("target", 16)
+        assert(seen == 1 and theirs == 0, "an inspected item: " .. tostring(theirs))
+        local _, _, vault = tt:SetInventoryItem("player", 42)
+        assert(vault == 89, "vault slot 3 by live id 42: " .. tostring(vault))
+        local _, vault_bag = tt:SetBagItem(-1, 3)
+        assert(vault_bag == 89, "vault slot 3 as a bag: " .. tostring(vault_bag))
+        local _, bag = tt:SetBagItem(0, 1)
+        assert(bag == 567, "bag: " .. tostring(bag))
+        local _, whole = tt:SetBagItem(0, 2)
+        assert(whole == 0, "no cost: " .. tostring(whole))
+    "#,
+    )
+    .unwrap();
+    assert!(s.take_errors().is_empty());
+}

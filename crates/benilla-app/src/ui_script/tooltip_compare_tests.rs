@@ -248,6 +248,112 @@ fn doll_hover_renders_the_live_instance() {
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }
 
+/// In repair mode a damaged item's hover adds `REPAIR_COST` and its coins, worn
+/// (`PaperDollFrame.lua:757-760`) or bagged (`ContainerFrame.lua:274-277`); out of it, neither.
+#[test]
+fn repair_mode_hover_shows_the_items_repair_cost() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = harness_with_bags();
+    s.set_unit("player", Some(player()));
+    let mut inv: InventorySlots = Default::default();
+    inv[16] = Some(InvSlotView {
+        item_id: 1300,
+        count: 1,
+        quality: 2,
+        name: Some("Worn Sword".into()),
+        link: Some("|cff1eff00|Hitem:1300:0:0:0|h[Worn Sword]|h|r".into()),
+        durability: Some((35, 75)),
+        equip_slots: vec![16],
+        ..Default::default()
+    });
+    s.set_inventory_slots(inv);
+    let mut slots = std::collections::HashMap::new();
+    slots.insert(
+        1,
+        ContainerSlot {
+            item_id: 1301,
+            count: 1,
+            quality: Some(2),
+            link: Some("|cff1eff00|Hitem:1301:0:0:0|h[Worn Helm]|h|r".into()),
+            durability: Some((10, 40)),
+            equip_slots: vec![1],
+            ..Default::default()
+        },
+    );
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots,
+        }),
+    );
+    s.set_item_template(
+        1300,
+        ItemTemplateView {
+            class: 2,
+            subclass: 7,
+            max_durability: 75,
+            sell_price: 5,
+            ..armor_template("Worn Sword", 13)
+        },
+    );
+    s.set_item_template(
+        1301,
+        ItemTemplateView {
+            max_durability: 40,
+            sell_price: 5,
+            ..armor_template("Worn Helm", 1)
+        },
+    );
+    let mut costs = benilla_ui::script::RepairCosts::default();
+    costs.equipped.insert(16, 40);
+    costs.bags.insert((0, 1), 57);
+    s.set_repair_costs(costs);
+    s.set_merchant(Some(benilla_ui::script::MerchantState {
+        can_repair: true,
+        ..Default::default()
+    }));
+    // `MERCHANT_SHOW` opens the backpack.
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    s.run(r#"ToggleCharacter("PaperDollFrame")"#).unwrap();
+    s.take_sounds();
+    let repair_line = |s: &UiScript| -> Option<String> {
+        s.eval::<bool>(
+            "for i = 1, GameTooltip:NumLines() do \
+               if getglobal('GameTooltipTextLeft' .. i):GetText() == REPAIR_COST then \
+                 return true end \
+             end return false",
+        )
+        .unwrap()
+        .then(|| {
+            s.eval::<String>("return GameTooltipMoneyFrameCopperButton:GetText()")
+                .unwrap()
+        })
+    };
+    let bag = bag_slot_button(&s, 0, 1);
+
+    hover(&mut s, &bag);
+    assert_eq!(repair_line(&s), None, "a bag hover out of repair mode");
+    hover(&mut s, "CharacterMainHandSlot");
+    assert_eq!(repair_line(&s), None, "a doll hover out of repair mode");
+
+    s.run("ShowRepairCursor()").unwrap();
+    hover(&mut s, &bag);
+    assert_eq!(
+        repair_line(&s).as_deref(),
+        Some("57"),
+        "the bag slot's cost"
+    );
+    hover(&mut s, "CharacterMainHandSlot");
+    assert_eq!(
+        repair_line(&s).as_deref(),
+        Some("40"),
+        "the worn sword's cost"
+    );
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
 /// `MerchantItemButton`'s `OnEnter` (`MerchantFrame.xml:67`) seats plate 1 at the tooltip's
 /// `TOPRIGHT` (0, -10) and plate 2 off plate 1. The compare call passes p4 = 0, so a plate is the
 /// worn item's ordinary tooltip under a gray `Currently Equipped` line.

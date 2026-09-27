@@ -338,7 +338,8 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // not byte-read as `SetBagItem`'s two is (`0x534985`). Unit-keyed through `Model::inv_slot`:
     // an inspected item (`InspectPaperDollFrame.xml:20`) has no durability or creator, so those
     // lines do not show, as in the reference. An armed shopping tooltip renders the compare
-    // shape; the arm is consumed either way. repairCost is 0, as `SetBagItem`'s is.
+    // shape; the arm is consumed either way. repairCost is the item's cost (`0x5332fb`), 0 for an
+    // inspected unit's.
     m.set(
         "SetInventoryItem",
         lua.create_function(
@@ -348,7 +349,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 // (`0x533027..0x53304c`); anything else builds the ordinary tooltip, without an
                 // error. Three of the binding's four builder legs pass it on, not `0x533106`.
                 let name_only = super::binding_abi::positive_number_flag(lua, name_only)?;
-                let (item_id, name, quality, inst, currently_equipped) = {
+                let (item_id, name, quality, inst, repair_cost, currently_equipped) = {
                     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                     let armed = match super::tooltip::tip_mut(&mut model, h) {
                         Ok(t) => std::mem::take(&mut t.equipped_header_armed),
@@ -381,8 +382,13 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                                 },
                             )
                         });
+                    let cost = if unit.eq_ignore_ascii_case("player") {
+                        model.inv_repair_cost(slot)
+                    } else {
+                        0
+                    };
                     match view {
-                        Some((id, name, q, inst)) => (id, name, q, inst, armed),
+                        Some((id, name, q, inst)) => (id, name, q, inst, cost, armed),
                         // An empty slot answers nil and still pushes the other two: callers
                         // destructure all three first, and an addon may add up repairCost.
                         None => {
@@ -434,7 +440,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     } else {
                         Value::Nil
                     },
-                    Value::Integer(0),
+                    Value::Integer(i64::from(repair_cost)),
                 ]))
             },
         )?,
@@ -443,14 +449,14 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
     // GameTooltip:SetBagItem(bag, slot) -> hasCooldown, repairCost: the real-instance hover and
     // the one money source: with the merchant open and repair off (`0x52e376`), the engine fires
     // `OnTooltipAddMoney(SellPrice × stack)`, or prints ITEM_UNSELLABLE at price 0 (`0x854a74`,
-    // pushed at `0x52e4a3`). repairCost is 0: the per-item repair cost is not fed. The reference
-    // always pushes a number there (`0x534975`), and stock guards on `> 0`.
+    // pushed at `0x52e4a3`). repairCost is the item's cost (`0x534975`), shown in repair mode.
     m.set(
         "SetBagItem",
         lua.create_function(|lua, (this, bag, slot): (Table, i64, u32)| {
             let h = frame_handle_of(lua, &this)?;
-            let (item_id, count, has_cd, link, quality, inst) = {
+            let (item_id, count, has_cd, link, quality, inst, repair_cost) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
+                let cost = model.repair_costs.bags.get(&(bag, slot)).copied();
                 match model
                     .containers
                     .get(&bag)
@@ -485,6 +491,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                                 openable_source: !has_cd,
                                 duration_ms: s.duration_ms,
                             },
+                            cost.unwrap_or(0),
                         )
                     }
                     None => return Ok(MultiValue::from_vec(vec![Value::Nil])),
@@ -529,7 +536,7 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             Ok(MultiValue::from_vec(vec![
                 // The builder's `[ebp-0x38]`: a running cooldown or the item's duration line.
                 Value::Boolean(has_cd || inst.duration_ms.is_some()),
-                Value::Integer(0),
+                Value::Integer(i64::from(repair_cost)),
             ]))
         })?,
     )?;

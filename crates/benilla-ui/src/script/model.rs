@@ -569,8 +569,10 @@ pub(crate) struct Model {
 
     /// The open vendor's stock, the `BuyMerchantItem` calls and whether `CloseMerchant` ran.
     pub(crate) merchant: Option<merchant::MerchantState>,
-    /// `GetRepairAllCost`'s total, which the app pushes every frame a vendor is open.
+    /// `GetRepairAllCost`'s total; 0 unless a repairer is open.
     pub(crate) repair_all_cost: u32,
+    /// The repair costs `SetInventoryItem` and `SetBagItem` return.
+    pub(crate) repair_costs: merchant::RepairCosts,
     pub(crate) merchant_buys: Vec<(u32, u32)>,
     /// The held `(bag, slot)` when `PickupMerchantItem` sells, sent as `CMSG_SELL_ITEM`.
     pub(crate) merchant_cursor_sells: Vec<(i64, u32)>,
@@ -1189,6 +1191,7 @@ impl Model {
             gossip_quest_selects: Vec::new(),
             merchant: None,
             repair_all_cost: 0,
+            repair_costs: Default::default(),
             merchant_buys: Vec::new(),
             merchant_cursor_sells: Vec::new(),
             merchant_slot_buys: Vec::new(),
