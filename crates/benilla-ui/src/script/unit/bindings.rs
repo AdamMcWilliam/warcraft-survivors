@@ -1079,12 +1079,31 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SpellTargetUnit(unit): a no-op. A unit-target spell never enters targeting mode here, and for
-    // the location, item and gameobject modes this client arms, the reference's `BindTarget`
-    // (`0x6e5b40`) rejects a unit too. Stock `PetFrame_OnClick` calls it, so it must exist.
+    // SpellTargetUnit(unit) (`0x6e6d90`): an argument that is not a string or a number raises
+    // `Usage:`; while not targeting the call is a silent no-op, before the token is read; an
+    // unknown token then raises `Unknown unit name`. The token queues for the host, which ends
+    // targeting with "Out of range." when it names no unit and otherwise runs `BindTarget`
+    // (`0x6e5b10` → `0x6e5b40`).
     g.set(
         "SpellTargetUnit",
-        lua.create_function(|_, _token: Option<String>| Ok(()))?,
+        lua.create_function(|lua, token: Value| {
+            let token = crate::script::binding_abi::string_arg(
+                lua,
+                token,
+                r#"Usage: SpellTargetUnit("unit")"#,
+            )?;
+            if !lua
+                .app_data_ref::<Model>()
+                .expect("model app_data")
+                .spell_targeting
+            {
+                return Ok(());
+            }
+            check_unit_token(&Some(token.clone()))?;
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            model.spell_target_unit.push(token);
+            Ok(())
+        })?,
     )?;
 
     // ClearTarget(): 1 when it cleared a target, nil when there was none, which `ToggleGameMenu`'s

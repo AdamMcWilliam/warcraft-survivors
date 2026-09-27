@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 
 use crate::char_select::ClientState;
-use crate::ui_script::UiInput;
+use crate::ui_script::{UiFeed, UiInput};
 use crate::ui_unit::UnitFeed;
 use benilla_world::schedule::WorldStage;
 
@@ -32,7 +32,7 @@ pub(crate) use inflight::{
 };
 pub(crate) use mods::{SpellModifiers, OP_COST};
 // `TargetingWants` is exported for the ground reticle, which draws for the location word alone.
-pub(crate) use targeting::{ground_cast_radius, SpellTargeting, TargetingWants};
+pub(crate) use targeting::{ground_cast_radius, PicksSelf, SpellTargeting, TargetingWants};
 
 /// The local self-cancel's set: a reader of the in-flight state orders `.after(LocalCancel)` so a
 /// cast ended by a move, jump or Esc drops its cast bar the same frame.
@@ -53,6 +53,7 @@ impl Plugin for SpellPlugin {
             .init_resource::<AutoSelfCast>()
             .init_resource::<SpellTargeting>()
             .init_resource::<targeting::EnchantConfirmItem>()
+            .init_resource::<targeting::PicksSelf>()
             .add_observer(cast_target::on_cvar)
             .add_systems(
                 Update,
@@ -65,7 +66,12 @@ impl Plugin for SpellPlugin {
                         .before(UnitFeed),
                     // The state push runs before the input pass's `ToggleGameMenu` and the drain
                     // after it, so an Esc cancel lands before next frame's cursor reads the mode.
-                    targeting::feed_targeting_to_vm.in_set(UnitFeed),
+                    // After the old-target clear, the pet bar's writer in the feed: `"pet"`
+                    // resolves off the bar.
+                    targeting::feed_targeting_to_vm
+                        .in_set(UnitFeed)
+                        .after(crate::ui_pet::pet_stop_on_old_target_clear),
+                    targeting::publish_picks_self.in_set(UiFeed),
                     targeting::drain_stop_targeting.after(UiInput),
                     // The item-target commit (`0x495d60`): after the input pass so a bag click
                     // binds the same frame; outside the target chain, as its clicks never reach
