@@ -545,6 +545,8 @@ pub(crate) struct CameraControl {
     pub(super) world_mouse: WorldMouse,
     /// Logical cursor position captured when look began, to restore on release.
     pub(super) cursor_stash: Option<Vec2>,
+    /// A look session is running with the OS cursor handed back: the window is unfocused.
+    pub(super) cursor_released: bool,
     /// The self-avatar's alpha from the camera-to-pivot distance, 1 in third person to 0 in first
     /// (`self_model_fade_alpha`); applied by [`apply_self_model_fade`].
     pub(super) self_fade_alpha: f32,
@@ -573,9 +575,16 @@ impl CameraControl {
         self.target_distance = d;
     }
 
-    /// True while a mouse-look drag is active (right- or left-button). The cursor is hidden then.
+    /// True while a mouse-look drag is active (right- or left-button).
     pub(crate) fn is_looking(&self) -> bool {
         self.look.is_some()
+    }
+
+    /// True while a look session holds the OS cursor, hidden and locked: looking, and focused.
+    /// Read by the macOS cursor hide, the one platform that hides the cursor itself.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn holds_cursor(&self) -> bool {
+        self.look.is_some() && !self.cursor_released
     }
 
     /// The self-avatar's render alpha this frame. The blob shadow multiplies it in, as the
@@ -601,16 +610,23 @@ impl LookButton {
     }
 }
 
-/// The mouse buttons the world owns, latched at the press. 1.12 reads the `TurnOrAction` and
-/// `CameraOrSelectOrMove` bindings, which a press a UI frame captured never dispatches: no mouse
-/// bit in `[InputControl+0x4]`, no look session, no [`FollowState`]. The world's down sets the bit
-/// and that button's up clears it, so a frame appearing under the locked cursor cannot steal it.
+/// The mouse buttons the world owns, latched at the press, and the two channels they drive. 1.12
+/// reads the `TurnOrAction` and `CameraOrSelectOrMove` bindings, which a press a UI frame captured
+/// never dispatches: no mouse bit in `[InputControl+0x4]`, no look session, no [`FollowState`].
+/// The world's down sets the bit and that button's up clears it, so a frame appearing under the
+/// locked cursor cannot steal it. `MouselookStart` sets the TurnOrAction bit with no button.
 #[derive(Default)]
 pub(super) struct WorldMouse {
     /// Held by the world right now, indexed by [`LookButton`].
     held: [bool; 2],
     /// Took its down edge from the world this frame, same index.
     down: [bool; 2],
+    /// `MouselookStart` holds the TurnOrAction channel (`0x515090(1, 1, …)` at `0x514231`).
+    scripted: bool,
+    /// This frame's `MouselookStart` raised the channel.
+    scripted_rise: bool,
+    /// A `MouselookStart`/`Stop` ran this frame; each disarms the pending click (`0x514810(0)`).
+    disarmed: bool,
 }
 
 impl WorldMouse {
@@ -622,18 +638,58 @@ impl WorldMouse {
         self.down[b as usize]
     }
 
-    /// Both primaries in the world's hand: the both-button run.
+    /// The TurnOrAction channel, `[InputControl+4] & 1`: the world's right button, or a
+    /// `MouselookStart` with none.
+    pub(super) fn turn(&self) -> bool {
+        self.held(LookButton::Right) || self.scripted
+    }
+
+    /// The channel `b`'s look session runs on: TurnOrAction for right, the left button's own.
+    pub(super) fn channel(&self, b: LookButton) -> bool {
+        match b {
+            LookButton::Right => self.turn(),
+            LookButton::Left => self.held(LookButton::Left),
+        }
+    }
+
+    /// Both channels held: the both-button run (`0x514da0` nets `0x1` and `0x2` as forward).
     pub(super) fn both(&self) -> bool {
-        self.held(LookButton::Right) && self.held(LookButton::Left)
+        self.turn() && self.held(LookButton::Left)
+    }
+
+    /// A channel rose this frame, by a press or a `MouselookStart`: with [`Self::both`], the
+    /// transition into the both-button run (`0x514a73`, in the set helper both reach).
+    pub(super) fn rose(&self) -> bool {
+        self.down(LookButton::Left) || self.down(LookButton::Right) || self.scripted_rise
+    }
+
+    /// A `MouselookStart`/`Stop` this frame: no click may settle from the gesture in flight.
+    pub(super) fn disarmed(&self) -> bool {
+        self.disarmed
     }
 
     /// Latch this frame; `world_press` says whether a down edge belongs to the world. A held bit
     /// rides to its release, including a cover's emptying of the button planes.
     fn update(&mut self, buttons: &ButtonInput<MouseButton>, world_press: bool) {
+        self.scripted_rise = false;
+        self.disarmed = false;
         for b in [LookButton::Right, LookButton::Left] {
             let i = b as usize;
             self.down[i] = world_press && buttons.just_pressed(b.button());
             self.held[i] = (self.held[i] || self.down[i]) && buttons.pressed(b.button());
+        }
+    }
+
+    /// `MouselookStart` (`on`) or `MouselookStop`: one bit, whoever set it, so a stop also ends
+    /// a right drag in flight, whose release then clears nothing.
+    fn mouselook(&mut self, on: bool) {
+        self.disarmed = true;
+        if on {
+            self.scripted_rise |= !self.turn();
+            self.scripted = true;
+        } else {
+            self.scripted = false;
+            self.held[LookButton::Right as usize] = false;
         }
     }
 }
@@ -655,18 +711,39 @@ pub(super) fn latch_world_mouse(
     mut rig: ResMut<CameraControl>,
     cameras: Query<&Camera, With<FlyCam>>,
     window: Single<&Window, With<PrimaryWindow>>,
-    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    mut script: Option<NonSendMut<benilla_ui::script::UiScript>>,
+    cover: Option<Res<crate::loading_screen::LoadingScreen>>,
 ) {
+    let calls = script
+        .as_mut()
+        .map(|s| s.take_mouselook_calls())
+        .unwrap_or_default();
     let Ok(camera) = cameras.single() else {
         return;
     };
     let over_ui = pointer_over_ui.0;
     let world_press = rig.look.is_some() || (cursor_in_viewport(&window, camera) && !over_ui);
-    rig.world_mouse.update(&buttons, world_press);
-    // `IsMouselooking` (`0x514270`) reads `[InputControl+4] & 1`, the TurnOrAction channel: the
-    // world's right button, the press the TURNORACTION binding latches.
+    let wm = &mut rig.world_mouse;
+    wm.update(&buttons, world_press);
+    // The script's calls, made since the last latch, before this frame's release.
+    for on in calls {
+        wm.mouselook(on);
+    }
+    // The right button's release ends a scripted channel too, wherever its press went: in
+    // freelook every button event goes to the `WorldFrame` (`0x492b50`), whose TURNORACTION up
+    // runs `TurnOrActionStop` (`0x514160`), `0x515090(1, 0, …)`.
+    if buttons.just_released(MouseButton::Right) {
+        wm.scripted = false;
+    }
+    // The world enter behind the cover clears the whole word (`0x5144c0` → `0x514b70(-1, …)`).
+    // A window deactivate clears none of it (`0x5144a3 and eax,0xfffff00f` keeps the low bits):
+    // the session outlives the focus, and only the OS cursor goes back ([`sync_look_focus`]).
+    if cover.is_some_and(|c| c.covering()) {
+        wm.scripted = false;
+    }
+    // `IsMouselooking` (`0x514270`) reads `[InputControl+4] & 1`, the TurnOrAction channel.
     if let Some(mut script) = script {
-        script.set_turn_or_action_held(rig.world_mouse.held(LookButton::Right));
+        script.set_turn_or_action_held(rig.world_mouse.turn());
     }
 }
 
@@ -714,9 +791,9 @@ pub(crate) struct CameraPivot {
 /// The mouse-look session: start, stop and hand-off between the buttons, cursor grab and restore,
 /// the look rotation, and the click tests behind [`WorldClick`]/[`WorldRightClick`]. Orbit and
 /// select are independent: each primary press engages its session at once and arms a click test,
-/// and the release decides on [`PressGesture::is_click`] alone.
+/// and the release decides on [`PressGesture::is_click`] alone. A session lasts while its
+/// [`WorldMouse::channel`] is held, so a `MouselookStart` runs the right button's session.
 pub(super) fn run_look_session(
-    buttons: &ButtonInput<MouseButton>,
     mouse_motion: &AccumulatedMouseMotion,
     both_buttons: bool,
     rig: &mut CameraControl,
@@ -737,18 +814,30 @@ pub(super) fn run_look_session(
     dynamics: &DynamicsInput,
     // Seconds on the app clock, for the press predicate's two time gates.
     now: f32,
+    // The primary window has the OS focus.
+    focused: bool,
 ) {
+    // The mouse moves the view only through a held cursor: motion while unfocused, or on the frame
+    // that takes the cursor back, is the pointer travelling in another app.
+    let motion = if sync_look_focus(rig, focused, window, cursor_opts) {
+        mouse_motion.delta
+    } else {
+        Vec2::ZERO
+    };
     // A chord is a both-button run, never a select: the reference kills the pending click and arms
-    // none while another primary's binding is held (`0x514ac1`, `0x51481a`).
-    if rig.world_mouse.both() {
+    // none while another primary's binding is held (`0x514ac1`, `0x51481a`). A `MouselookStart` or
+    // `Stop` disarms it too, ahead of the channel's move (`0x514810(0)` stores mode 0 unguarded,
+    // then `0x515090`), so a stop's release, or the button's after it, selects nothing.
+    let disarmed = rig.world_mouse.disarmed();
+    if rig.world_mouse.both() || disarmed {
         *left_click = None;
         *right_click = None;
     }
     // Both tests accumulate the rotation the press asked for, charged before the pitch clamp: the
     // reference accumulates raw motion, so a drag pinned at the pitch limit still spends budget.
     let (yaw_rate, pitch_rate) = (look_cfg.yaw_rate(), look_cfg.pitch_rate());
-    let dyaw = (mouse_motion.delta.x * yaw_rate).abs();
-    let dpitch = (mouse_motion.delta.y * pitch_rate).abs();
+    let dyaw = (motion.x * yaw_rate).abs();
+    let dpitch = (motion.y * pitch_rate).abs();
     for test in [&mut *left_click, &mut *right_click].into_iter().flatten() {
         test.yaw_travel += dyaw;
         test.pitch_travel += dpitch;
@@ -757,8 +846,8 @@ pub(super) fn run_look_session(
     // Both buttons engage their session on the down edge, with no threshold (`0x51491f`); the click
     // test rides along to the release. Looking hides and locks the cursor until the release.
     if let Some(active) = rig.look {
-        if !buttons.pressed(active.button()) {
-            // The button went up: settle its click test (a chord already cancelled both).
+        if !rig.world_mouse.channel(active) {
+            // The channel went down: settle its click test (a chord already cancelled both).
             let test = match active {
                 LookButton::Left => left_click.take(),
                 LookButton::Right => right_click.take(),
@@ -775,51 +864,43 @@ pub(super) fn run_look_session(
                     }
                 }
             }
-            // Hand off to the other button if the world holds it, as the reference keeps turning;
-            // a button the UI holds never fired its binding.
+            // Hand off to the other channel if it is held, as the reference keeps turning; a
+            // button the UI holds never fired its binding.
             let other = match active {
                 LookButton::Right => LookButton::Left,
                 LookButton::Left => LookButton::Right,
             };
-            if rig.world_mouse.held(other) {
+            if rig.world_mouse.channel(other) {
                 rig.look = Some(other);
             } else {
-                rig.look = None;
-                cursor_opts.grab_mode = CursorGrabMode::None;
-                // Show the cursor again; on macOS hiding is the cursor subsystem's job.
-                cursor_opts.visible = true;
-                if let Some(pos) = rig.cursor_stash.take() {
-                    window.set_cursor_position(Some(pos));
-                }
+                disengage_look(rig, window, cursor_opts);
             }
         }
     } else {
         // `WorldMouse` has already dropped a press over the UI, the dev overlay or outside the
         // viewport. Right-drag turns, and arms its click test unless left is held.
         if rig.world_mouse.down(LookButton::Right) {
-            rig.look = Some(LookButton::Right);
-            rig.cursor_stash = window.cursor_position();
-            cursor_opts.grab_mode = CursorGrabMode::Locked;
-            cursor_opts.visible = false;
-            *right_click =
-                (!rig.world_mouse.held(LookButton::Left)).then(|| PressGesture::new(now));
+            engage_look(rig, LookButton::Right, focused, window, cursor_opts);
+            *right_click = (!rig.world_mouse.held(LookButton::Left) && !disarmed)
+                .then(|| PressGesture::new(now));
+        } else if rig.world_mouse.turn() {
+            // `MouselookStart` with no button: the channel's rise enters the same freelook
+            // (`0x514840` → `0x51491f`), and no click is armed (`0x514810(0)`).
+            engage_look(rig, LookButton::Right, focused, window, cursor_opts);
         } else if rig.world_mouse.down(LookButton::Left) && !inspect_enabled {
             // Left-drag orbits, engaged on the press like right (`0x51491f`); the select settles
             // at the release. While the inspector is armed, left belongs to it.
-            rig.look = Some(LookButton::Left);
-            rig.cursor_stash = window.cursor_position();
-            cursor_opts.grab_mode = CursorGrabMode::Locked;
-            cursor_opts.visible = false;
+            engage_look(rig, LookButton::Left, focused, window, cursor_opts);
             // A cursor-payload world drop still orbits (`0x51491f`) but must not also select.
             *right_click = None;
-            *left_click = (!click_consumed && !rig.world_mouse.held(LookButton::Right))
+            *left_click = (!click_consumed && !rig.world_mouse.turn() && !disarmed)
                 .then(|| PressGesture::new(now));
         }
     }
 
     // Look rotation; a right-drag also turns the character.
     if let Some(active) = rig.look {
-        let delta = mouse_motion.delta;
+        let delta = motion;
         let d_yaw = -delta.x * yaw_rate;
         cam.yaw += d_yaw;
         // `mouseInvertPitch` flips only the pitch axis.
@@ -848,6 +929,81 @@ pub(super) fn run_look_session(
     // Freelook is right-held mouse-look or a both-button run, which steers like it; a left-drag
     // orbit is not. This test and the `face_yaw` sync above must stay alike.
     rig.freelook = rig.look == Some(LookButton::Right) || (rig.look.is_some() && both_buttons);
+}
+
+/// Start `button`'s look session: stash the cursor, then lock and hide it until the session ends,
+/// or leave it free while the window is unfocused ([`sync_look_focus`]).
+fn engage_look(
+    rig: &mut CameraControl,
+    button: LookButton,
+    focused: bool,
+    window: &Window,
+    cursor_opts: &mut CursorOptions,
+) {
+    rig.look = Some(button);
+    if focused {
+        take_cursor(rig, window, cursor_opts);
+    } else {
+        rig.cursor_released = true;
+    }
+}
+
+/// End the look session: free and show the cursor, and put it back where the look began unless
+/// it was already free, when it is wherever the player left it.
+fn disengage_look(rig: &mut CameraControl, window: &mut Window, cursor_opts: &mut CursorOptions) {
+    rig.look = None;
+    let stash = rig.cursor_stash.take();
+    if !std::mem::take(&mut rig.cursor_released) {
+        release_cursor(cursor_opts);
+        if let Some(pos) = stash {
+            window.set_cursor_position(Some(pos));
+        }
+    }
+}
+
+/// Stash the cursor, then lock and hide it for the session.
+fn take_cursor(rig: &mut CameraControl, window: &Window, cursor_opts: &mut CursorOptions) {
+    rig.cursor_stash = window.cursor_position();
+    cursor_opts.grab_mode = CursorGrabMode::Locked;
+    cursor_opts.visible = false;
+}
+
+/// Unlock and show the cursor; on macOS hiding is the cursor subsystem's job.
+fn release_cursor(cursor_opts: &mut CursorOptions) {
+    cursor_opts.grab_mode = CursorGrabMode::None;
+    cursor_opts.visible = true;
+}
+
+/// Hand the OS cursor back while the window is unfocused and take it again on focus, without
+/// touching the session: the look state outlives a deactivate (`0x514490` keeps the mouse bits).
+/// Platform behaviour, not a reference fact. On macOS winit's `Locked` is the global
+/// `CGAssociateMouseAndMouseCursorPosition(false)`, and losing key status (`windowDidResignKey`)
+/// leaves it, so a lock held while unfocused freezes the pointer in every other app; 1.12.1's
+/// Windows client gives the cursor back to other applications while inactive. Returns whether the
+/// session holds the cursor through this whole frame, so its motion may turn the view.
+fn sync_look_focus(
+    rig: &mut CameraControl,
+    focused: bool,
+    window: &Window,
+    cursor_opts: &mut CursorOptions,
+) -> bool {
+    if rig.look.is_none() {
+        return focused;
+    }
+    match (focused, rig.cursor_released) {
+        (false, false) => {
+            release_cursor(cursor_opts);
+            rig.cursor_released = true;
+            false
+        }
+        (true, true) => {
+            // The pointer is where the player brought it back: the release restores it there.
+            take_cursor(rig, window, cursor_opts);
+            rig.cursor_released = false;
+            false
+        }
+        (focused, _) => focused,
+    }
 }
 
 /// Seat the camera on whatever it orbits: our own body, or the far-sight subject `PLAYER_FARSIGHT`
@@ -1365,6 +1521,9 @@ pub(crate) fn cam_dump_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("WOW_CAM_DUMP").is_some())
 }
+
+#[cfg(test)]
+mod mouselook_tests;
 
 #[cfg(test)]
 mod tests {

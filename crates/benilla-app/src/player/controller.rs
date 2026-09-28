@@ -227,8 +227,8 @@ pub(super) fn control(
         *left_click = None;
         *right_click = None;
     }
+    let focused = window.focused;
     run_look_session(
-        &buttons,
         mouse_motion,
         both_buttons,
         &mut rig,
@@ -245,6 +245,7 @@ pub(super) fn control(
         look_cfg,
         &dynamics,
         time.elapsed_secs(),
+        focused,
     );
     // The mouse turns the view, but the body hand-off (`0x514474`) skips a body that is stunned,
     // dead or seated (`0x5145e0`) or not ours to drive (`control_lost`, `reseat`), while the
