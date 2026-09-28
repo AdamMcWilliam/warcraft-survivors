@@ -74,6 +74,7 @@ mod surface;
 pub use surface::widget_method_census;
 mod input_verbs;
 mod inspect;
+mod inventory_verbs;
 mod item_stats;
 mod item_text;
 pub mod keybind;
@@ -213,15 +214,17 @@ pub use inspect::{InspectView, UnitReach};
 pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState};
 pub use item_text::ItemTextState;
 pub use layout_cache::{FrameLayout, LayoutPoint};
-pub use loot::{LootRow, LootState};
+pub use loot::{LootRow, LootState, LOOT_PORTRAIT_UNIT};
 pub use loot_roll::{LootRollEntry, LootRollsState};
-pub use macros::{MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
-pub use mail::{MailInboxRow, MailInvoice, MailSendRequest, MailState, StationeryView};
+pub use macros::{MacroBinding, MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
+pub use mail::{
+    MailInboxRow, MailInvoice, MailSendRequest, MailState, PackageView, StationeryView,
+};
 pub use measure::TextMeasure;
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState, RepairCosts};
 pub(crate) use minimap::apply_model_attrs as apply_minimap_model_attrs;
 pub(crate) use model::Model;
-pub use model::{FontProbe, TextureProbe, TextureSizeProbe};
+pub use model::{FontProbe, TextureProbe, TextureSizeProbe, WorldLocProjector};
 pub use party::{PartyMemberInfo, PartyRequest, PartyState, RaidMemberInfo, SavedInstanceInfo};
 pub use pet::{PetActionView, PetStats};
 pub use pvp::{HonorState, InspectHonorData};
@@ -567,6 +570,7 @@ impl UiScript {
         skills::install(&lua)?;
         item_stats::install(&lua)?;
         char_stats::install(&lua)?;
+        inventory_verbs::install(&lua)?;
         weapon_enchant::install(&lua)?;
         loot::install(&lua)?;
         loot_roll::install(&lua)?;

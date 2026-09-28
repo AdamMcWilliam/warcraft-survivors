@@ -17,6 +17,12 @@ use super::{
 /// The host's answer to whether a texture path resolves to a file.
 pub type TextureProbe = Box<dyn Fn(&str) -> bool>;
 
+/// The host's world-to-map projection (`0x4a7360`): the displayed map's selection as
+/// [`super::UiScript::world_map_selection`] reads it, a map id and a world `(x, y)`, to the map UV,
+/// `None` where the reference's outputs stay at their `(0, 0)`.
+pub type WorldLocProjector =
+    Box<dyn Fn((u32, u32, Option<u32>), u32, f32, f32) -> Option<(f32, f32)>>;
+
 /// The host's answer to a texture path's size in texels.
 pub type TextureSizeProbe = Box<dyn Fn(&str) -> Option<(u32, u32)>>;
 
@@ -76,6 +82,8 @@ pub(crate) struct Model {
     /// Whether a texture path resolves (patch chain or loose addon file), so the path form of
     /// `SetTexture` returns the reference's 1 or nil inline (`0x79bb40`). `None` answers nil.
     pub(crate) texture_probe: Option<TextureProbe>,
+    /// `GetWorldLocMapPosition`'s projection; `None` answers `(0, 0)`.
+    pub(crate) world_loc_projector: Option<WorldLocProjector>,
     /// A path's texel size, which an axis authored as 0 takes, one texel per unit, as the client's
     /// `GetWidth` (`0x770720`) and `GetHeight` (`0x770790`) do; `None` leaves it as authored.
     pub(crate) texture_size_probe: Option<TextureSizeProbe>,
@@ -431,6 +439,8 @@ pub(crate) struct Model {
     pub(crate) macros_dirty: bool,
     /// Bumped by every seed and change, for readers that must not drain `macros_dirty`.
     pub(crate) macros_generation: u64,
+    /// Each macro's cached cast by 1-based index, from the app; an absent macro reads unbound.
+    pub(crate) macro_bindings: HashMap<u32, macros::MacroBinding>,
     /// The macro icon paths from `SpellIcon.dbc`, behind `GetMacroIconInfo`.
     pub(crate) macro_icons: Vec<String>,
     /// `ToggleSpellAutocast` ids for `CMSG_PET_SPELL_AUTOCAST` (`0x2F3`), which names a spell.
@@ -709,6 +719,10 @@ pub(crate) struct Model {
     pub(crate) mail_stationeries: Vec<mail::StationeryView>,
     /// `SelectStationery`'s `Stationery.dbc` id; 0 is none, which silences `SendMail`.
     pub(crate) mail_stationery: u32,
+    /// `Package.dbc`'s rows in file order, `GetPackageInfo`'s list.
+    pub(crate) mail_packages: Vec<mail::PackageView>,
+    /// `SelectPackage`'s `Package.dbc` id (`[0xb6efb8]`); 0 is none.
+    pub(crate) mail_package: u32,
     /// `HasNewMail()` (`0x4afea0`), from `MSG_QUERY_NEXT_MAIL_TIME` and `SMSG_RECEIVED_MAIL`.
     pub(crate) has_new_mail: bool,
 
@@ -998,6 +1012,7 @@ impl Model {
             addons_chain_reader: None,
             measurer: None,
             texture_probe: None,
+            world_loc_projector: None,
             texture_size_probe: None,
             font_probe: None,
             addons_saved_account: None,
@@ -1150,6 +1165,7 @@ impl Model {
             macros: macros::MacroState::default(),
             macros_dirty: false,
             macros_generation: 0,
+            macro_bindings: HashMap::new(),
             macro_icons: Vec::new(),
             pet_spell_autocasts: Vec::new(),
             casting: false,
@@ -1291,6 +1307,8 @@ impl Model {
             mail_send_item: None,
             mail_stationeries: Vec::new(),
             mail_stationery: 0,
+            mail_packages: Vec::new(),
+            mail_package: 0,
             has_new_mail: false,
             auction: None,
             auction_item_classes: Vec::new(),
