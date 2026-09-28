@@ -389,7 +389,7 @@ fn panel_event(panel: QuestPanel) -> &'static str {
 
 /// Push the quest view into the VM and fire its events: a panel's open event on a new panel,
 /// `QUEST_ITEM_UPDATE` on a content change, `QUEST_FINISHED` on close.
-fn feed_quest(
+pub(crate) fn feed_quest(
     script: Option<NonSendMut<UiScript>>,
     mut giver: ResMut<QuestGiver>,
     objects: crate::net::Objects,

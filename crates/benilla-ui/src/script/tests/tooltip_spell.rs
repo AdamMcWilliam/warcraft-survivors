@@ -1034,3 +1034,356 @@ fn quest_reward_spell_getters_and_hovers() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// A craft recipe row whose detail icon hovers `tooltip`.
+fn craft_recipe(spell_id: u32, name: &str, tooltip: CraftTooltip) -> CraftRecipe {
+    CraftRecipe {
+        spell_id,
+        tooltip,
+        name: name.into(),
+        sub_name: String::new(),
+        difficulty: TradeSkillDifficulty::Optimal,
+        num_available: 1,
+        icon: None,
+        description: None,
+        needs_item_target: false,
+        reagents: vec![],
+        tools: vec![],
+        spell_level: 0,
+    }
+}
+
+/// Firebolt (3110) on a pet-bar slot.
+fn firebolt_slot() -> PetActionView {
+    PetActionView {
+        name: Some("Firebolt".into()),
+        spell_id: Some(3110),
+        ..Default::default()
+    }
+}
+
+fn firebolt() -> SpellTooltipView {
+    SpellTooltipView {
+        name: "Firebolt".into(),
+        rank: Some("Rank 1".into()),
+        cost: Some("10 Mana".into()),
+        range: Some("30 yd range".into()),
+        cast_time: Some("1 sec cast".into()),
+        description: "Deals 7 to 10 Fire damage to a target.".into(),
+        ..Default::default()
+    }
+}
+
+/// Pet-bar tokens and craft item subjects name no spell, so they are left out.
+#[test]
+fn the_spell_subjects_are_what_the_setters_read_from_the_vm() {
+    let mut s = script();
+    s.set_pet_actions(
+        true,
+        true,
+        true,
+        vec![
+            PetActionView {
+                name: Some("PET_ACTION_ATTACK".into()),
+                is_token: true,
+                ..Default::default()
+            },
+            firebolt_slot(),
+        ],
+    );
+    s.set_pet_book(PetBookState {
+        token: Some("DEMON".into()),
+        slots: vec![SpellSlotView {
+            spell_id: 6307,
+            name: "Blood Pact".into(),
+            ..Default::default()
+        }],
+    });
+    let reward = |spell_id| {
+        Some(QuestRewardSpell {
+            spell_id,
+            ..Default::default()
+        })
+    };
+    s.set_quest(Some(QuestState {
+        panel: QuestPanel::Reward,
+        reward_spell: reward(133),
+        ..QuestState::default()
+    }));
+    s.set_quest_log(QuestLogState {
+        entries: vec![QuestLogEntryView {
+            quest_id: 7,
+            detail: Some(QuestLogDetail {
+                reward_spell: reward(116),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    s.set_craft(Some(CraftState {
+        name: "Beast Training".into(),
+        rank: 0,
+        max_rank: 0,
+        craft_type: 1,
+        recipes: vec![
+            craft_recipe(24599, "Bite", CraftTooltip::Spell(17253)),
+            craft_recipe(7421, "Runed Copper Rod", CraftTooltip::Item(6218)),
+        ],
+    }));
+    let aura = |spell_id| AuraState {
+        spell_id,
+        ..Default::default()
+    };
+    s.set_player_auras(vec![aura(1459)]);
+    // The pet's, the target-of-target's and party1's lists, by guid.
+    s.set_unit_auras(0xF140_0000_0000_0077, Some(vec![aura(172)]));
+    s.set_unit_auras(0x21, Some(vec![aura(589)]));
+    s.set_unit_auras(0x22, Some(vec![aura(8921)]));
+    s.set_tracking(Some(TrackingState {
+        spell_id: 2580,
+        name: Some("Find Minerals".into()),
+        icon: None,
+        cancelable: true,
+    }));
+
+    let mut subjects = s.spell_tooltip_subjects();
+    subjects.sort_unstable();
+    assert_eq!(
+        subjects,
+        vec![116, 133, 172, 589, 1459, 2580, 3110, 6307, 8921, 17253]
+    );
+}
+
+/// No second hover and no second `OnTooltipCleared`: the reference builds the tooltip at the call.
+#[test]
+fn a_missed_view_re_renders_the_tooltip_when_the_app_answers() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_pet_actions(true, true, true, vec![firebolt_slot()]);
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "TT")
+        TT:SetOwner(PB1, "ANCHOR_RIGHT")
+        CLEARED = 0
+        TT:SetScript("OnTooltipCleared", function() CLEARED = CLEARED + 1 end)
+        TT:SetPetAction(1)
+    "#,
+    )
+    .unwrap();
+    assert_eq!(left_lines(&mut s), vec!["Firebolt"]);
+    assert_eq!(s.take_spell_tooltip_asks(), vec![3110]);
+
+    s.set_spell_tooltip(3110, firebolt());
+    assert_eq!(
+        left_lines(&mut s),
+        vec![
+            "Firebolt",
+            "10 Mana",
+            "1 sec cast",
+            "Deals 7 to 10 Fire damage to a target."
+        ]
+    );
+    assert!(s.eval::<bool>("return TT:IsShown() == 1").unwrap());
+    assert!(
+        s.take_spell_tooltip_asks().is_empty(),
+        "the re-render found the view"
+    );
+    assert_eq!(
+        s.eval::<i64>("return CLEARED").unwrap(),
+        1,
+        "one setter call, one OnTooltipCleared"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// Beast Training's icon has no fallback name, so its miss is a hidden plate.
+#[test]
+fn a_hidden_miss_shows_and_an_enchant_link_fills_when_answered() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_craft(Some(CraftState {
+        name: "Beast Training".into(),
+        rank: 0,
+        max_rank: 0,
+        craft_type: 1,
+        recipes: vec![craft_recipe(24599, "Bite", CraftTooltip::Spell(17253))],
+    }));
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "CI"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "TT")
+        CreateFrame("GameTooltip", "REF")
+        TT:SetOwner(CI, "ANCHOR_RIGHT")
+        TT:SetCraftSpell(1)
+        REF:SetOwner(CI, "ANCHOR_PRESERVE")
+        REF:SetHyperlink("|cffffd000|Henchant:20034|h[Enchant Weapon - Crusader]|h|r")
+    "#,
+    )
+    .unwrap();
+    assert_eq!(s.eval::<i64>("return TT:NumLines()").unwrap(), 0);
+    assert!(!s.eval::<bool>("return TT:IsShown() == 1").unwrap());
+    assert_eq!(
+        s.eval::<String>("return REFTextLeft1:GetText()").unwrap(),
+        "Enchant Weapon - Crusader"
+    );
+    assert_eq!(s.eval::<i64>("return REF:NumLines()").unwrap(), 1);
+
+    s.set_spell_tooltip(
+        17253,
+        SpellTooltipView {
+            name: "Bite".into(),
+            description: "Bite the enemy.".into(),
+            ..Default::default()
+        },
+    );
+    s.set_spell_tooltip(
+        20034,
+        SpellTooltipView {
+            name: "Enchant Weapon - Crusader".into(),
+            cast_time: Some("5 sec cast".into()),
+            description: "Permanently enchant a melee weapon.".into(),
+            ..Default::default()
+        },
+    );
+    assert!(s.eval::<bool>("return TT:IsShown() == 1").unwrap());
+    assert_eq!(
+        s.eval::<(String, String)>("return TTTextLeft1:GetText(), TTTextLeft2:GetText()")
+            .unwrap(),
+        ("Bite".to_string(), "Bite the enemy.".to_string())
+    );
+    assert_eq!(
+        s.eval::<(i64, String)>("return REF:NumLines(), REFTextLeft3:GetText()")
+            .unwrap(),
+        (3, "Permanently enchant a melee weapon.".to_string())
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// A new hover, a hide, an added line or a running fade leaves the tooltip as it is.
+#[test]
+fn new_content_or_an_added_line_ends_the_wait() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_pet_actions(true, true, true, vec![firebolt_slot()]);
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "TT")
+        CreateFrame("GameTooltip", "HID")
+        CreateFrame("GameTooltip", "ADD")
+        TT:SetOwner(PB1, "ANCHOR_RIGHT")
+        TT:SetPetAction(1)
+        TT:SetOwner(PB1, "ANCHOR_RIGHT")
+        TT:SetText("Attack")
+        HID:SetOwner(PB1, "ANCHOR_RIGHT")
+        HID:SetPetAction(1)
+        HID:Hide()
+        ADD:SetOwner(PB1, "ANCHOR_RIGHT")
+        ADD:SetPetAction(1)
+        ADD:AddLine("an addon's line")
+        CreateFrame("GameTooltip", "FAD")
+        FAD:SetOwner(PB1, "ANCHOR_RIGHT")
+        FAD:SetPetAction(1)
+        FAD:FadeOut()
+    "#,
+    )
+    .unwrap();
+    s.set_spell_tooltip(3110, firebolt());
+    assert_eq!(left_lines(&mut s), vec!["Attack"]);
+    assert_eq!(s.eval::<i64>("return HID:NumLines()").unwrap(), 0);
+    assert!(!s.eval::<bool>("return HID:IsShown() == 1").unwrap());
+    assert_eq!(
+        s.eval::<(i64, String)>("return ADD:NumLines(), ADDTextLeft2:GetText()")
+            .unwrap(),
+        (2, "an addon's line".to_string())
+    );
+    assert_eq!(s.eval::<i64>("return FAD:NumLines()").unwrap(), 1);
+    assert!(s.take_errors().is_empty());
+}
+
+/// What Lua wrote after the miss is kept: a line rewritten in place, by `AppendText` or a cell's
+/// `SetTextColor`, or new content that reads the same as the miss's line.
+#[test]
+fn a_line_rewritten_in_place_ends_the_wait() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_pet_actions(true, true, true, vec![firebolt_slot()]);
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "APP")
+        CreateFrame("GameTooltip", "COL")
+        APP:SetOwner(PB1, "ANCHOR_RIGHT")
+        APP:SetPetAction(1)
+        APP:AppendText(" (Pet)")
+        COL:SetOwner(PB1, "ANCHOR_RIGHT")
+        COL:SetPetAction(1)
+        COLTextLeft1:SetTextColor(1, 0, 0)
+        CreateFrame("GameTooltip", "SAM")
+        SAM:SetOwner(PB1, "ANCHOR_RIGHT")
+        SAM:SetPetAction(1)
+        SAM:SetOwner(PB1, "ANCHOR_RIGHT")
+        SAM:SetText("Firebolt", 1, 1, 1)
+    "#,
+    )
+    .unwrap();
+    s.set_spell_tooltip(3110, firebolt());
+    assert_eq!(
+        s.eval::<(i64, String)>("return APP:NumLines(), APPTextLeft1:GetText()")
+            .unwrap(),
+        (1, "Firebolt (Pet)".to_string())
+    );
+    assert_eq!(
+        s.eval::<(i64, f32, f32)>(
+            "local r, g = COLTextLeft1:GetTextColor(); return COL:NumLines(), r, g"
+        )
+        .unwrap(),
+        (1, 1.0, 0.0)
+    );
+    assert_eq!(s.eval::<i64>("return SAM:NumLines()").unwrap(), 1);
+    assert!(s.take_errors().is_empty());
+}
+
+/// A re-render's `OnShow` can move another waiting tooltip onto a new spell.
+#[test]
+fn a_wait_replaced_by_an_earlier_re_render_is_not_replayed() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_pet_actions(true, true, true, vec![firebolt_slot()]);
+    s.set_craft(Some(CraftState {
+        name: "Beast Training".into(),
+        rank: 0,
+        max_rank: 0,
+        craft_type: 1,
+        recipes: vec![craft_recipe(24599, "Firebolt", CraftTooltip::Spell(3110))],
+    }));
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "PB1"); a:SetPoint("CENTER", 0, 0); a:SetWidth(10); a:SetHeight(10)
+        CreateFrame("GameTooltip", "A")
+        CreateFrame("GameTooltip", "B")
+        A:SetOwner(PB1, "ANCHOR_RIGHT")
+        A:SetCraftSpell(1)
+        B:SetOwner(PB1, "ANCHOR_RIGHT")
+        B:SetPetAction(1)
+        A:SetScript("OnShow", function()
+            B:SetOwner(PB1, "ANCHOR_RIGHT")
+            B:SetHyperlink("|cffffd000|Henchant:20034|h[Enchant Weapon - Crusader]|h|r")
+        end)
+    "#,
+    )
+    .unwrap();
+    s.set_spell_tooltip(3110, firebolt());
+    assert_eq!(
+        s.eval::<(i64, String)>("return B:NumLines(), BTextLeft1:GetText()")
+            .unwrap(),
+        (1, "Enchant Weapon - Crusader".to_string())
+    );
+    assert_eq!(
+        s.eval::<String>("return ATextLeft1:GetText()").unwrap(),
+        "Firebolt"
+    );
+    assert!(s.take_errors().is_empty());
+}
