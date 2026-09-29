@@ -1,9 +1,7 @@
 //! The spell-description `$`-token engine the 1.12 client runs over `Spell.dbc` description and
-//! aura text (`0x5075f0` → `0x507710`), effect values from `GetEffectPoints 0x6e3800`. Values are
-//! the flat term: the reference's per-level terms (`DicePerLevel·max(0, casterLevel − baseLevel)`
-//! on the dice, and `RealPointsPerLevel`) are not applied. Values print unsigned, as the client's
-//! do. `$g` always takes the first form, as there is no gender input, and `$u` and any unknown or
-//! unresolved token stay raw.
+//! aura text (`0x5075f0` → `0x507710`), effect values from `GetEffectPoints 0x6e3800`. Values
+//! print unsigned, as the client's do. `$g` always takes the first form, as there is no gender
+//! input, and `$u` and any unknown or unresolved token stay raw.
 
 use super::soft_float;
 use super::{SpellDisplay, SpellDurationCatalog, SpellRadiusCatalog, SpellRangeCatalog};
@@ -29,6 +27,11 @@ pub struct TokenContext<'a> {
     pub durations: &'a SpellDurationCatalog,
     pub radii: &'a SpellRadiusCatalog,
     pub ranges: Option<&'a SpellRangeCatalog>,
+    /// `0x5ea520` behind `0x6de040`: the active player's skill in a spell's `SkillLineAbility`
+    /// line, bonuses included, by spell id; 0 without a player or a line. Every per-level term
+    /// scales by the level derived from it ([`SpellDisplay::skill_level`]), not the character
+    /// level.
+    pub skill: &'a dyn Fn(u32) -> u32,
     pub lookup: &'a dyn Fn(u32) -> Option<&'a SpellDisplay>,
     /// The caster's live spell-modifier tables; absent for contexts without a caster.
     pub mods: Option<&'a dyn SpellMods>,
@@ -55,6 +58,11 @@ fn tenths(ctx: &TokenContext, v: f32) -> String {
     (ctx.printf)("%.1f", &[TokenNumber::Float(f64::from(v))])
 }
 
+/// `0x6e3130` for the active player (`0x6e318d`: `CGPlayer`'s `[vtbl+0xa8]`, `0x5ea690`).
+fn skill_level(ctx: &TokenContext, d: &SpellDisplay) -> u32 {
+    d.skill_level((ctx.skill)(d.id))
+}
+
 /// `0x6e3b80`'s verdict on an effect: whether its points round to whole numbers (its out-byte)
 /// and whether it takes a damage op (its return).
 fn classify(effect: u32, aura: u32) -> (bool, bool) {
@@ -70,18 +78,41 @@ fn classify(effect: u32, aura: u32) -> (bool, bool) {
     }
 }
 
-/// `GetEffectPoints 0x6e3800`: the effect's `(min, max)` as the soft floats it returns. The
-/// bounds start as the flat term, `BasePoints + BaseDice` and `BasePoints + DieSides·BaseDice`
-/// (the per-level terms at `6e3863`-`6e391a` are not applied). Unless the context is the aura
-/// tooltip's, op 8, then a damage effect's op (22 for aura 3, else 0), then the aura's
-/// ([`aura_op`]) apply to each bound through `0x6e6c30`. The tail quantizes both to 1/128, and a
-/// rounding effect floors the minimum and ceils the maximum (`6e3a67`).
-fn effect_points(d: &SpellDisplay, slot: usize, ctx: &TokenContext) -> (f32, f32) {
+/// `GetEffectPoints 0x6e3800`: the effect's `(min, max)` as the soft floats it returns. A `level`
+/// of 0 takes the spell's own ([`skill_level`], `6e3841`-`6e3852`); `Δ` is it less `baseLevel`
+/// when that is positive, floored at 0 (`6e3854`-`6e3861`). With `n` the dice, the integer
+/// `BaseDice + DicePerLevel·Δ`, the bounds start as `BasePoints + n` and `BasePoints +
+/// DieSides·n` (`6e3863`, `6e38bb`), each made a soft float plus `RealPointsPerLevel × Δ`
+/// through `0x760be0` and `0x760e20`. Unless the context is the aura tooltip's, op 8, then a
+/// damage effect's op (22 for aura 3, else 0), then the aura's ([`aura_op`]) apply to each bound
+/// through `0x6e6c30`. The tail quantizes both to 1/128, and a rounding effect floors the minimum
+/// and ceils the maximum (`6e3a67`).
+fn effect_points(d: &SpellDisplay, slot: usize, ctx: &TokenContext, level: u32) -> (f32, f32) {
+    let level = if level == 0 {
+        skill_level(ctx, d)
+    } else {
+        level
+    } as i32;
+    let base_level = d.base_level as i32;
+    let delta = if base_level > 0 {
+        level.wrapping_sub(base_level)
+    } else {
+        level
+    }
+    .max(0);
     let base = d.effect_base_points[slot];
-    let dice = d.effect_base_dice[slot];
+    let dice =
+        d.effect_base_dice[slot].wrapping_add(d.effect_dice_per_level[slot].wrapping_mul(delta));
     let sides = d.effect_die_sides[slot];
-    let mut min = soft_float::int_to_float(base.wrapping_add(dice));
-    let mut max = soft_float::int_to_float(base.wrapping_add(sides.wrapping_mul(dice)));
+    let real = soft_float::mul_f32(
+        d.effect_real_points_per_level[slot],
+        soft_float::int_to_float(delta),
+    );
+    let mut min = soft_float::add_f32(soft_float::int_to_float(base.wrapping_add(dice)), real);
+    let mut max = soft_float::add_f32(
+        soft_float::int_to_float(base.wrapping_add(sides.wrapping_mul(dice))),
+        real,
+    );
     let aura = d.effect_apply_aura[slot];
     let (rounds, damage) = classify(d.effects[slot], aura);
     if let Some(mods) = ctx.mods.filter(|_| !ctx.unmodified_points) {
@@ -121,23 +152,31 @@ fn modify_float(ctx: &TokenContext, d: &SpellDisplay, op: u8, value: f32) -> f32
     ctx.mods.map_or(value, |m| m.apply_float(d, op, value))
 }
 
-/// A spell's duration in ms, flat term only. `GetSpellDuration 0x6ea000` applies op 1 after
-/// resolving and capping the DBC row, unless its flag says not to (`6ea064`); `$d` and `$o` both
-/// call it.
-fn duration_ms(d: &SpellDisplay, ctx: &TokenContext) -> Option<i64> {
-    let row = ctx.durations.get(d.duration_index)?;
-    let resolved = row.base_ms.min(row.max_ms);
-    Some(i64::from(if ctx.unmodified_points {
+/// A spell's duration in ms, `GetSpellDuration 0x6ea000`, which `$d` and `$o` both call: 0 with
+/// no row (`6ea032`), else the row's base plus its per-level term times the spell's own level ([`skill_level`], `6ea041`)
+/// less `baseLevel`, subtracted and multiplied unfloored (`6ea046`-`6ea053`), capped at the row's
+/// maximum (`6ea055`), then op 1 unless its flag says not to (`6ea064`).
+fn duration_ms(d: &SpellDisplay, ctx: &TokenContext) -> i64 {
+    let Some(row) = ctx.durations.get(d.duration_index) else {
+        return 0;
+    };
+    let levels = (skill_level(ctx, d) as i32).wrapping_sub(d.base_level as i32);
+    let resolved = row
+        .base_ms
+        .wrapping_add(levels.wrapping_mul(row.per_level_ms))
+        .min(row.max_ms);
+    i64::from(if ctx.unmodified_points {
         resolved
     } else {
         modify_int(ctx, d, 1, resolved)
-    }))
+    })
 }
 
-/// The duration formatter at `0x52f980` selects the integer ladder (`0x52fa50`) for whole
-/// units and the floating ladder (`0x52fbd0`) for fractional units. Both use the largest unit.
+/// The `$d` text: no positive duration is `SPELL_DURATION_UNTIL_CANCELLED` (`507cda`); else the
+/// formatter at `0x52f980` selects the integer ladder (`0x52fa50`) for whole units and the
+/// floating ladder (`0x52fbd0`) for fractional units. Both use the largest unit.
 fn duration_text(ms: i64, ctx: &TokenContext) -> Option<String> {
-    if ms < 0 {
+    if ms <= 0 {
         return keyed(ctx, "SPELL_DURATION_UNTIL_CANCELLED", &[]);
     }
     let (unit, unit_ms) = if ms < 60_000 {
@@ -191,18 +230,15 @@ fn points_text(
     d: &SpellDisplay,
     ctx: &TokenContext,
     scale: f32,
+    level: u32,
 ) -> Option<(String, f64)> {
     // The expander multiplies both by its integer argument here (`5078d1`), which is 1 but in
     // the aura tooltip's stack count; no caller passes a count.
-    let (mut min, mut max) = effect_points(d, slot, ctx);
+    let (mut min, mut max) = effect_points(d, slot, ctx, level);
     if letter.eq_ignore_ascii_case(&'o') {
         let amplitude = d.effect_amplitude[slot] as i32;
         let period = if amplitude == 0 { 5000 } else { amplitude };
-        let duration = if period > 0 {
-            duration_ms(d, ctx).unwrap_or(0)
-        } else {
-            0
-        };
+        let duration = if period > 0 { duration_ms(d, ctx) } else { 0 };
         (min, max) = if duration > 0 {
             let over = |v: f32| (duration as f64 * f64::from(v) / f64::from(period)) as f32;
             (over(min), over(max))
@@ -262,11 +298,12 @@ fn token_value(
     d: &SpellDisplay,
     ctx: &TokenContext,
     scale: f32,
+    level: u32,
 ) -> Option<(String, f64)> {
     match letter.to_ascii_lowercase() {
-        's' | 'm' | 'o' => points_text(letter, slot, d, ctx, scale),
+        's' | 'm' | 'o' => points_text(letter, slot, d, ctx, scale, level),
         'd' => {
-            let ms = duration_ms(d, ctx)?;
+            let ms = duration_ms(d, ctx);
             let v = if ms < 0 { 0.0 } else { ms as f64 / 1000.0 };
             Some((duration_text(ms, ctx)?, v))
         }
@@ -372,6 +409,9 @@ fn atoi(bytes: &[u8]) -> i32 {
 
 /// Substitute every `$`-token in `text` against `spell`.
 pub fn substitute(text: &str, spell: &SpellDisplay, ctx: &TokenContext) -> String {
+    // `0x5075f0`'s level: its caller's, which only the player-buff tooltip passes (the aura's
+    // `AURALEVELS` byte, `0x532bc3`, not built), else the expanded spell's own (`50764a`).
+    let level = skill_level(ctx, spell);
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
@@ -446,17 +486,19 @@ pub fn substitute(text: &str, spell: &SpellDisplay, ctx: &TokenContext) -> Strin
         } else {
             0
         };
-        let target: &SpellDisplay = match ref_spell {
+        // A cross-spell token caps the level at its row's positive `maxLevel` (`507805`-`507817`).
+        let (target, level): (&SpellDisplay, u32) = match ref_spell {
             Some(id) => match (ctx.lookup)(id) {
-                Some(s) => s,
+                Some(s) if s.max_level > 0 => (s, level.min(s.max_level)),
+                Some(s) => (s, level),
                 None => {
                     out.push_str(&text[start..i]);
                     continue;
                 }
             },
-            None => spell,
+            None => (spell, level),
         };
-        match token_value(letter, slot, target, ctx, scale) {
+        match token_value(letter, slot, target, ctx, scale, level) {
             Some((sub, val)) => {
                 // Deviation: every token keys the `$l` plural. The reference's `$a`, `$d`, `$t`,
                 // `$e`, `$c`, `$p`, `$f`, `$F` and `$z` arms never write `[0xbe0b84]`, so its `$l`
@@ -573,6 +615,7 @@ mod tests {
             durations,
             radii,
             ranges: None,
+            skill: &|_| 0,
             lookup,
             mods: None,
             unmodified_points: false,
@@ -616,6 +659,7 @@ mod tests {
             (4, 7_200_000),
             (5, 172_800_000),
             (6, -1),
+            (7, 0),
         ] {
             durations.insert_for_tests(idx, ms);
         }
@@ -636,6 +680,9 @@ mod tests {
         assert_eq!(d(4), "<2hrs>", "but two take the _P1 twin");
         assert_eq!(d(5), "<2days>", "the days arm the ladder used to lack");
         assert_eq!(d(6), "<forever>");
+        // No positive duration, and no row, which `0x6ea000` reads as 0 (`507cda`).
+        assert_eq!(d(7), "<forever>");
+        assert_eq!(d(8), "<forever>");
     }
 
     #[test]
@@ -971,6 +1018,181 @@ mod tests {
                 "{description}"
             );
         }
+    }
+
+    /// The per-level terms scale by the skill level (`0x6e3130`): the skill capped at
+    /// `maxLevel × 5`, over 5 in integers, less `baseLevel` floored at 0. Battle Shout rank 1
+    /// (14 + 1d1, 0.5 a level from 1, cap 11), Power Word: Shield rank 1 (43 + 1d1, 0.8 from 6,
+    /// cap 11), Fireball rank 1 (13 + 1d9, 0.6 from 1, cap 5, a rounding effect).
+    #[test]
+    fn per_level_terms_scale_by_the_skill_level_from_real_spells() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let spells = crate::load_spell_catalog(&mut chain).expect("Spell.dbc");
+        let durations = SpellDurationCatalog::default();
+        let radii = SpellRadiusCatalog::default();
+        let lookup = |id| spells.get(id);
+        let skill = std::cell::Cell::new(0);
+        let skill_of = |_| skill.get();
+        let c = TokenContext {
+            skill: &skill_of,
+            ..ctx(&durations, &radii, &lookup)
+        };
+        let at = |value: u32, id: u32| {
+            skill.set(value);
+            substitute("$s1", spells.get(id).unwrap(), &c)
+        };
+        // Levels 1, 11 and 60 at a class line's level × 5, and the cap at 11.
+        for (skill, expected) in [(0, "15"), (5, "15"), (55, "20"), (300, "20")] {
+            assert_eq!(at(skill, 6673), expected, "Battle Shout at skill {skill}");
+        }
+        assert_eq!(at(300, 17), "48");
+        // Level 3 is under baseLevel 6: no negative term.
+        assert_eq!(at(15, 17), "44");
+        assert_eq!(at(0, 133), "<14..22>");
+        // Skill 24 is level 4, not 4.8: 14 + 1.8 floored, 22 + 1.8 ceiled.
+        assert_eq!(at(24, 133), "<15..24>");
+        // 14 + 2.4 floored, 22 + 2.4 ceiled (`6e3a67`).
+        assert_eq!(at(300, 133), "<16..25>");
+    }
+
+    /// A `baseLevel` at or below 0 is not subtracted (`6e3859`): the level itself is Δ.
+    #[test]
+    fn a_base_level_at_or_below_zero_is_not_subtracted() {
+        let durations = SpellDurationCatalog::default();
+        let radii = SpellRadiusCatalog::default();
+        let d = SpellDisplay {
+            base_level: -1i32 as u32,
+            effect_real_points_per_level: [1.0, 0.0, 0.0],
+            ..points(10)
+        };
+        let c = TokenContext {
+            skill: &|_| 50,
+            ..ctx(&durations, &radii, &none_lookup)
+        };
+        assert_eq!(substitute("$s1", &d, &c), "20");
+    }
+
+    /// A cross-spell token takes the expanded spell's level capped at its own row's `maxLevel`
+    /// (`507805`); only a level of 0 falls through to the referenced spell's own (`6e3841`).
+    #[test]
+    fn a_cross_spell_token_caps_the_outer_level() {
+        let durations = SpellDurationCatalog::default();
+        let radii = SpellRadiusCatalog::default();
+        let per_level = |id: u32, max_level: u32| SpellDisplay {
+            id,
+            base_level: 1,
+            max_level,
+            effect_real_points_per_level: [1.0, 0.0, 0.0],
+            ..points(10)
+        };
+        let (capped, uncapped) = (per_level(2, 10), per_level(3, 0));
+        let lookup = |id: u32| match id {
+            2 => Some(&capped),
+            3 => Some(&uncapped),
+            _ => None,
+        };
+        let outer = SpellDisplay {
+            id: 1,
+            ..Default::default()
+        };
+        // The outer spell at level 30; the referenced ones in no line of the player's.
+        let c = TokenContext {
+            skill: &|id| if id == 1 { 150 } else { 0 },
+            ..ctx(&durations, &radii, &lookup)
+        };
+        assert_eq!(substitute("$2s1 $3s1", &outer, &c), "19 39");
+        // The outer spell at level 0: each takes its own, 100 capped at 10 × 5.
+        let c = TokenContext {
+            skill: &|id| if id == 1 { 0 } else { 100 },
+            ..ctx(&durations, &radii, &lookup)
+        };
+        assert_eq!(substitute("$2s1 $3s1", &outer, &c), "19 29");
+    }
+
+    /// Resurrection Sickness (15007) is the one shipped spell on a per-level duration row: 427,
+    /// -600000 ms plus 60000 a level, capped at 600000. In no line of the player's its level is 0,
+    /// and a duration at or below 0 reads as until cancelled.
+    #[test]
+    fn the_duration_takes_its_per_level_term_from_real_data() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let spells = crate::load_spell_catalog(&mut chain).expect("Spell.dbc");
+        let durations = crate::load_spell_durations(&mut chain).expect("SpellDuration.dbc");
+        let radii = SpellRadiusCatalog::default();
+        let lookup = |id| spells.get(id);
+        let sickness = spells.get(15007).expect("Resurrection Sickness");
+        assert_eq!(sickness.duration_index, 427);
+        let skill = std::cell::Cell::new(0);
+        let skill_of = |_| skill.get();
+        let c = TokenContext {
+            skill: &skill_of,
+            ..ctx(&durations, &radii, &lookup)
+        };
+        for (value, expected) in [
+            (0, "<forever>"),
+            (50, "<forever>"),
+            (55, "<1min>"),
+            (150, "<10min>"),
+        ] {
+            skill.set(value);
+            assert_eq!(substitute("$d", sickness, &c), expected, "skill {value}");
+        }
+    }
+
+    /// Below `baseLevel` the duration's per-level term goes negative: no floor (`6ea046`).
+    #[test]
+    fn the_duration_level_term_is_not_floored() {
+        let mut durations = SpellDurationCatalog::default();
+        durations.insert_row_for_tests(
+            1,
+            crate::SpellDuration {
+                base_ms: 20_000,
+                per_level_ms: 1_000,
+                max_ms: 30_000,
+            },
+        );
+        let radii = SpellRadiusCatalog::default();
+        let d = SpellDisplay {
+            base_level: 10,
+            duration_index: 1,
+            ..Default::default()
+        };
+        let skill = std::cell::Cell::new(0);
+        let skill_of = |_| skill.get();
+        let c = TokenContext {
+            skill: &skill_of,
+            ..ctx(&durations, &radii, &none_lookup)
+        };
+        // Level 5, five under: 20 s less 5 s. Level 20: 30 s, the cap.
+        skill.set(25);
+        assert_eq!(substitute("$d", &d, &c), "<15sec>");
+        skill.set(100);
+        assert_eq!(substitute("$d", &d, &c), "<30sec>");
+    }
+
+    #[test]
+    fn dice_per_level_reaches_spread_and_overtime_tokens() {
+        let mut durations = SpellDurationCatalog::default();
+        durations.insert_for_tests(1, 9_000);
+        let radii = SpellRadiusCatalog::default();
+        let spell = SpellDisplay {
+            base_level: 1,
+            max_level: 3,
+            duration_index: 1,
+            effect_base_points: [10, 0, 0],
+            effect_base_dice: [1, 0, 0],
+            effect_die_sides: [3, 0, 0],
+            effect_dice_per_level: [1, 0, 0],
+            effect_amplitude: [3_000, 0, 0],
+            ..Default::default()
+        };
+        // Level 20, capped at 3: two more dice.
+        let c = TokenContext {
+            skill: &|_| 100,
+            ..ctx(&durations, &radii, &none_lookup)
+        };
+        assert_eq!(substitute("$s1; $o1", &spell, &c), "<13..19>; <39..57>");
     }
 
     #[test]

@@ -129,6 +129,9 @@ fn feed_craft(
             durations: &spells.durations,
             radii: &spells.radii,
             ranges: Some(&spells.ranges),
+            skill: &|id| {
+                crate::spell::spell_skill_value(Some(store), Some(&skill_lines.catalog), id)
+            },
             lookup: &|id| spells.catalog.get(id),
             mods: Some(&*spell_mods),
             unmodified_points: false,

@@ -100,3 +100,92 @@ impl Plugin for SpellPlugin {
         net::register(app);
     }
 }
+
+/// The player's skill in `spell_id`'s own line, the input of every per-level term: `0x5ea690`
+/// hops spell to SkillLineAbility line (`0x6de040`), then `0x5ea520` reads that line's
+/// `PLAYER_SKILL_INFO` slot. Every missing input reads 0, like the reference's null paths.
+pub(crate) fn spell_skill_value(
+    me: Option<&crate::net::ObjectStore>,
+    skill_lines: Option<&benilla_formats::SkillLineCatalog>,
+    spell_id: u32,
+) -> u32 {
+    let Some(line) = skill_lines.and_then(|c| c.spell_to_line(spell_id)) else {
+        return 0;
+    };
+    let Some(store) = me else { return 0 };
+    line_skill_value(
+        (0..benilla_protocol::messages::PLAYER_SKILL_SLOTS)
+            .filter_map(|slot| store.0.player_skill(slot)),
+        line,
+    )
+}
+
+/// `0x5ea520`'s sum on the line's first slot (`0x5ea3f0`): the value, plus the bonus word's high
+/// half read unsigned when the value is positive (`0x5ea571`-`0x5ea580`), plus its low half read
+/// signed (`0x5ea5ac`-`0x5ea5ba`), floored at 0 (`0x5ea5bc`).
+fn line_skill_value(
+    slots: impl Iterator<Item = benilla_protocol::messages::PlayerSkillSlot>,
+    line: u32,
+) -> u32 {
+    for s in slots {
+        if u32::from(s.skill_id) == line {
+            let mut v = i32::from(s.value);
+            if v > 0 {
+                v += i32::from(s.perm_bonus as u16);
+            }
+            return (v + i32::from(s.temp_bonus)).max(0) as u32;
+        }
+    }
+    0
+}
+
+/// Each skill slot's line and effective value, all [`spell_skill_value`] reads: a text built
+/// against one snapshot is rebuilt when the next differs.
+pub(crate) type SkillSnapshot =
+    [(u16, u32); benilla_protocol::messages::PLAYER_SKILL_SLOTS as usize];
+
+/// The [`SkillSnapshot`] of the player; all zeros without one.
+pub(crate) fn skill_snapshot(me: Option<&crate::net::ObjectStore>) -> SkillSnapshot {
+    std::array::from_fn(|slot| {
+        me.and_then(|s| s.0.player_skill(slot as u8))
+            .map_or((0, 0), |s| {
+                (
+                    s.skill_id,
+                    line_skill_value(std::iter::once(s), s.skill_id.into()),
+                )
+            })
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use benilla_protocol::messages::PlayerSkillSlot;
+
+    fn slot(value: u16, temp_bonus: i16, perm_bonus: i16) -> PlayerSkillSlot {
+        PlayerSkillSlot {
+            skill_id: 43,
+            step: 0,
+            value,
+            max: 300,
+            temp_bonus,
+            perm_bonus,
+        }
+    }
+
+    /// The high bonus half counts only over a positive value, and unsigned; the low half is
+    /// signed and always counts; the sum floors at 0.
+    #[test]
+    fn the_skill_value_reads_its_bonus_halves_as_the_reference_does() {
+        let value = |s: PlayerSkillSlot| super::line_skill_value(std::iter::once(s), 43);
+        assert_eq!(value(slot(100, 0, 5)), 105);
+        assert_eq!(value(slot(0, 0, 5)), 0);
+        assert_eq!(value(slot(0, 7, 5)), 7);
+        assert_eq!(value(slot(100, -20, 0)), 80);
+        assert_eq!(value(slot(10, -20, 0)), 0);
+        assert_eq!(value(slot(1, 0, -1)), 65536);
+        assert_eq!(
+            super::line_skill_value(std::iter::once(slot(100, 0, 0)), 44),
+            0
+        );
+    }
+}
