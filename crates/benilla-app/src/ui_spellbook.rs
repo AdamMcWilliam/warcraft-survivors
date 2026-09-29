@@ -21,7 +21,6 @@ use benilla_ui::script::{ScriptValue, SpellBookState, SpellSlotView, SpellTabVie
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::NetCommands;
-use crate::spell::CastCommit;
 use crate::ui_action::{melee_auto_attack_icon, ranged_weapon_icon, PlayerActions, Spells};
 use crate::ui_script::gate;
 use crate::ui_unit::UnitFeed;
@@ -461,7 +460,7 @@ pub(crate) fn cast_spell(cast: &mut crate::spell::ScriptCast, spell_id: u32) {
         "ui_spellbook: cast {spell_id} (target {:?})",
         targeting.selection.guid
     );
-    ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
+    ladder.send_spell(spell_id, &targeting.context(), false);
 }
 
 #[cfg(test)]

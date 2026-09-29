@@ -149,6 +149,7 @@ mod tests {
         world.init_resource::<crate::spell::AutoRepeatActive>();
         world.init_resource::<crate::ui_tradeskill::TradeSkillOpens>();
         world.init_resource::<super::super::SpellTargeting>();
+        world.init_resource::<crate::spell::HeldForPick>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<Messages<WorldClick>>();
         // The commit legs read the press latch, not the live hover.

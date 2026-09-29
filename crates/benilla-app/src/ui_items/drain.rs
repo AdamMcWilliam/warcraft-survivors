@@ -803,6 +803,7 @@ mod tests {
             .init_resource::<crate::spell::AutoRepeatActive>()
             .init_resource::<crate::ui_tradeskill::TradeSkillOpens>()
             .init_resource::<crate::spell::targeting::SpellTargeting>()
+            .init_resource::<crate::spell::HeldForPick>()
             .init_resource::<Items>()
             .init_resource::<crate::net::GuidIndex>()
             .insert_resource(NetCommands(tx));
@@ -1747,6 +1748,7 @@ mod bind_confirm_tests {
             .init_resource::<crate::spell::AutoRepeatActive>()
             .init_resource::<crate::ui_tradeskill::TradeSkillOpens>()
             .init_resource::<crate::spell::targeting::SpellTargeting>()
+            .init_resource::<crate::spell::HeldForPick>()
             .init_resource::<Items>()
             .init_resource::<crate::net::GuidIndex>()
             .insert_resource(NetCommands(tx));

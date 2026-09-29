@@ -23,7 +23,7 @@ pub(crate) mod validator;
 
 // The one cast path: every caster takes [`CastLadder`] and commits through [`CastCommit`];
 // `send_spell_cast` is private to `cast_send`, so no second send path can exist.
-pub(crate) use cast_send::{CastCommit, CastLadder, TargetedBind};
+pub(crate) use cast_send::{CastCommit, CastLadder, HeldCast, HeldForPick, TargetedBind};
 pub(crate) use cast_target::AutoSelfCast;
 pub(crate) use cooldowns::Cooldowns;
 pub(crate) use inflight::{
@@ -62,6 +62,7 @@ impl Plugin for SpellPlugin {
             .init_resource::<SpellModifiers>()
             .init_resource::<AutoSelfCast>()
             .init_resource::<SpellTargeting>()
+            .init_resource::<HeldForPick>()
             .init_resource::<targeting::EnchantConfirmItem>()
             .init_resource::<targeting::PicksSelf>()
             .init_resource::<targeting::CorpsePick>()

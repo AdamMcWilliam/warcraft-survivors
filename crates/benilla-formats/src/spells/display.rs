@@ -459,13 +459,20 @@ impl SpellDisplay {
         self.attributes_ex & ATTR_EX_CHANNELED != 0
     }
 
+    /// Predicate `0x6e5200`: an on-next-swing, `INITIATES_COMBAT` or `INITIATE_COMBAT_POST_CAST`
+    /// spell. TryCast runs the attack validator's target pick for it (`0x6e4edf`), so a press
+    /// with no hostile selection acquires one, as the Attack button does.
+    pub fn initiates_combat(&self) -> bool {
+        self.attributes & ATTR_ON_NEXT_SWING != 0
+            || self.attributes_ex & ATTR_EX_INITIATES_COMBAT != 0
+            || self.attributes_ex2 & ATTR_EX2_INITIATE_COMBAT_POST_CAST != 0
+    }
+
     /// Casting this starts melee auto-attack at the send unless one runs (`TryCast` tail
     /// `0x6e51b5`): predicate `0x6e5200` with `AttributesEx2` bit 20 clear, so an on-next-swing
     /// or `INITIATES_COMBAT` spell. Every cast path shares the tail; there is no macro opt-out.
     pub fn initiates_auto_attack(&self) -> bool {
-        (self.attributes & ATTR_ON_NEXT_SWING != 0
-            || self.attributes_ex & ATTR_EX_INITIATES_COMBAT != 0)
-            && self.attributes_ex2 & ATTR_EX2_INITIATE_COMBAT_POST_CAST == 0
+        self.initiates_combat() && !self.initiates_auto_attack_at_go()
     }
 
     /// This spell's own `SMSG_SPELL_GO` starts melee auto-attack (`0x6131a0`) at its first hit

@@ -36,39 +36,51 @@ pub(crate) fn apply_script_calls(
     let Some(mut script) = script else {
         return;
     };
-    in_call_order(&mut script, |script, call| match call {
-        ScriptCall::Select(request) => appliers.p0().select(request),
-        ScriptCall::TargetByName { name, exact } => appliers.p0().target_by_name(&name, exact),
-        ScriptCall::TargetNearest { mode, reverse } => {
-            appliers.p0().target_nearest(mode, reverse);
-        }
-        ScriptCall::TargetLastTarget => appliers.p0().target_last_target(),
-        ScriptCall::ClearTarget => appliers.p0().clear_target(),
-        ScriptCall::AttackTarget => appliers.p7().attack_target(),
-        ScriptCall::SpellTargetUnit(token) => appliers.p1().spell_target_unit(&token),
-        ScriptCall::SpellStopTargeting => appliers.p1().stop_targeting(),
-        ScriptCall::SpellStopCasting => appliers.p2().stop_casting(),
-        ScriptCall::CastSpell(spell_id) => {
-            crate::ui_spellbook::cast_spell(&mut appliers.p3(), spell_id);
-        }
-        ScriptCall::CastShapeshiftForm(spell_id) => {
-            crate::ui_shapeshift::cast_form(&mut appliers.p3(), spell_id);
-        }
-        ScriptCall::UseAction(press) => {
-            let used = crate::ui_action::use_action(&mut appliers.p4(), script, press);
-            if used == crate::ui_action::UseOutcome::Attack {
-                appliers.p7().attack_target();
+    in_call_order(&mut script, |script, call| {
+        match call {
+            ScriptCall::Select(request) => appliers.p0().select(request),
+            ScriptCall::TargetByName { name, exact } => appliers.p0().target_by_name(&name, exact),
+            ScriptCall::TargetNearest { mode, reverse } => {
+                appliers.p0().target_nearest(mode, reverse);
             }
+            ScriptCall::TargetLastTarget => appliers.p0().target_last_target(),
+            ScriptCall::ClearTarget => appliers.p0().clear_target(),
+            ScriptCall::AttackTarget => appliers.p7().attack_target(),
+            ScriptCall::SpellTargetUnit(token) => appliers.p1().spell_target_unit(&token),
+            ScriptCall::SpellStopTargeting => appliers.p1().stop_targeting(),
+            ScriptCall::SpellStopCasting => appliers.p2().stop_casting(),
+            ScriptCall::CastSpell(spell_id) => {
+                crate::ui_spellbook::cast_spell(&mut appliers.p3(), spell_id);
+            }
+            ScriptCall::CastShapeshiftForm(spell_id) => {
+                crate::ui_shapeshift::cast_form(&mut appliers.p3(), spell_id);
+            }
+            ScriptCall::UseAction(press) => {
+                let used = crate::ui_action::use_action(&mut appliers.p4(), script, press);
+                if used == crate::ui_action::UseOutcome::Attack {
+                    appliers.p7().attack_target();
+                }
+            }
+            ScriptCall::UseContainerItem { bag, slot } => {
+                appliers.p5().use_container_item(script, bag, slot);
+            }
+            ScriptCall::UseInventoryItem(id) => appliers.p5().use_inventory_item(script, id),
+            ScriptCall::CastPetSpell(spell_id) => {
+                crate::ui_pet_book::cast_pet_spell(&mut appliers.p6(), spell_id);
+            }
+            ScriptCall::PetAction(slot) => appliers.p6().press_slot(slot),
+            ScriptCall::PetOrder(packed) => appliers.p6().order(packed),
         }
-        ScriptCall::UseContainerItem { bag, slot } => {
-            appliers.p5().use_container_item(script, bag, slot);
+        // TryCast's attack pick can move the selection mid-cast (`0x6e4efb`), so a press held
+        // there is picked and resumed before the next call reads the selection.
+        let Some(held) = appliers.p3().ladder.take_held() else {
+            return;
+        };
+        if appliers.p7().pick_for_cast(held) {
+            let mut cast = appliers.p3();
+            let ctx = cast.targeting.context();
+            cast.ladder.resume_after_pick(held, &ctx);
         }
-        ScriptCall::UseInventoryItem(id) => appliers.p5().use_inventory_item(script, id),
-        ScriptCall::CastPetSpell(spell_id) => {
-            crate::ui_pet_book::cast_pet_spell(&mut appliers.p6(), spell_id);
-        }
-        ScriptCall::PetAction(slot) => appliers.p6().press_slot(slot),
-        ScriptCall::PetOrder(packed) => appliers.p6().order(packed),
     });
 }
 
@@ -108,7 +120,9 @@ mod tests {
         ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, SelfGuid, SelfPlayer,
     };
     use crate::target::Selection;
-    use benilla_protocol::messages::{ActionButton, GroupMemberEntry, ACTION_KIND_MACRO};
+    use benilla_protocol::messages::{
+        ActionButton, GroupMemberEntry, ACTION_KIND_MACRO, ACTION_KIND_SPELL,
+    };
     use benilla_ui::script::{SpellBookState, SpellSlotView, SpellTabView};
     use bevy::ecs::system::RunSystemOnce;
     use crossbeam_channel::Receiver;
@@ -567,5 +581,121 @@ mod tests {
         run(&mut f, r#"UseAction(1) TargetUnit("party1")"#);
         assert_eq!(casts(&f), vec![(HEAL, Some(OLD))]);
         assert_eq!(selected(&f), Some(NEW));
+    }
+
+    /// Sinister Strike: `AttributesEx & 0x200`, one of predicate `0x6e5200`'s bits, and the enemy
+    /// word (implicit target 6).
+    const SINISTER_STRIKE: u32 = 1752;
+
+    /// Sinister Strike in the catalog and on action slot 1.
+    fn with_strike(f: &mut Frame) {
+        let world = f.app.world_mut();
+        let strike = benilla_formats::SpellDisplay {
+            attributes_ex: 0x200,
+            implicit_target_a1: 6,
+            ..Default::default()
+        };
+        world.insert_resource(crate::ui_action::Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(
+                [(SINISTER_STRIKE, strike)].into(),
+            ),
+            ..crate::ui_action::Spells::empty_for_tests()
+        });
+        world
+            .resource_mut::<crate::ui_action::PlayerActions>()
+            .buttons
+            .insert(
+                0,
+                ActionButton {
+                    slot: 0,
+                    action: SINISTER_STRIKE,
+                    kind: ACTION_KIND_SPELL,
+                },
+            );
+    }
+
+    /// The selections, strikes and swings sent, in wire order.
+    fn strike_wire(f: &Frame) -> Vec<(&'static str, u64)> {
+        f.rx.try_iter()
+            .filter_map(|c| match c {
+                ClientCommand::SetSelection { guid } => Some(("select", guid)),
+                ClientCommand::CastSpell {
+                    spell_id: SINISTER_STRIKE,
+                    target: Some(guid),
+                } => Some(("cast", guid)),
+                ClientCommand::AttackSwing { guid } => Some(("swing", guid)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// TryCast's attack pick (`0x6e4efb` → `0x612df0`): a strike pressed with no target selects the
+    /// nearest enemy before its bind, so the selection goes out ahead of the cast and its swing,
+    /// and the call after it reads the selection only once the cast is done.
+    #[test]
+    fn a_strike_with_no_target_selects_the_nearest_enemy_and_casts_at_it() {
+        let mut f = frame(false);
+        spawn_mob(&mut f, &[]);
+        with_strike(&mut f);
+        run(&mut f, r#"UseAction(1) TargetUnit("party1")"#);
+        assert_eq!(
+            strike_wire(&f),
+            vec![
+                ("select", MOB),
+                ("cast", MOB),
+                ("swing", MOB),
+                ("select", NEW)
+            ]
+        );
+    }
+
+    /// A self-cast press passes the caster to the pick (`0x4e610e`), and the reaction to oneself is
+    /// 4 (`0x606200`), so the pick Tabs to the enemy. With no faction table the caster would read
+    /// neutral and be kept.
+    #[test]
+    fn a_self_cast_strike_selects_the_nearest_enemy() {
+        let mut f = frame(false);
+        spawn_mob(&mut f, &[]);
+        with_strike(&mut f);
+        run(&mut f, "UseAction(1, 0, 1)");
+        assert_eq!(
+            strike_wire(&f),
+            vec![("select", MOB), ("cast", MOB), ("swing", MOB)]
+        );
+    }
+
+    /// The pick's keep test (`0x6130a3`) drops a friend, so a strike at one retargets the nearest
+    /// enemy, where the bind alone would refuse it as an invalid target.
+    #[test]
+    fn a_strike_at_a_friend_retargets_the_nearest_enemy() {
+        let mut f = frame(true);
+        with_factions(&mut f, FRIEND, &[]);
+        spawn_mob(&mut f, &[(TEMPLATE, FOE)]);
+        with_strike(&mut f);
+        run(&mut f, "UseAction(1)");
+        assert_eq!(
+            strike_wire(&f),
+            vec![("select", MOB), ("cast", MOB), ("swing", MOB)]
+        );
+    }
+
+    /// `0x6130d9`: with no enemy to acquire, the strike stops at the pick with "There is nothing to
+    /// attack.", not the bind's "You have no target.".
+    #[test]
+    fn a_strike_with_nothing_to_attack_says_so_and_sends_nothing() {
+        let mut f = frame(false);
+        with_strike(&mut f);
+        run(&mut f, "UseAction(1)");
+        assert_eq!(casts(&f), vec![]);
+        assert_eq!(selected(&f), None);
+        let world = f.app.world();
+        assert_eq!(
+            world.resource::<crate::ui_action::UiErrorKeys>().0,
+            vec![crate::ui_action::UiError::key("ERR_NO_ATTACK_TARGET")]
+        );
+        assert!(world
+            .resource::<crate::ui_action::CastErrors>()
+            .0
+            .is_empty());
     }
 }

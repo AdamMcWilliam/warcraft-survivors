@@ -505,6 +505,7 @@ mod tests {
         world.init_resource::<crate::spell::AutoRepeatActive>();
         world.init_resource::<crate::ui_tradeskill::TradeSkillOpens>();
         world.init_resource::<SpellTargeting>();
+        world.init_resource::<crate::spell::HeldForPick>();
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<crate::ui_party::GroupState>();
         let mut spells = crate::ui_action::Spells::empty_for_tests();

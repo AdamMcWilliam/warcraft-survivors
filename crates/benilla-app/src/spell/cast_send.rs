@@ -3,11 +3,11 @@
 //!
 //! The rungs: the auto-repeat toggle-off (the reference's action-button handler, ahead of TryCast;
 //! its order against the profession intercept is unobservable), the profession intercept, dead or a
-//! ghost, the targeting abort, in-flight, reagents and totems, the equipped item, target binding
-//! and range, then the validator `0x6094f0` (not-ready and GCD, power, crowd control, mounted,
-//! water, moving, form), the deferred cast-arm refusal and the targeting cursor. The commit tail
-//! follows: ranged stance, auto-repeat arm, the send, the auto-attack start, the GCD. A refusal is
-//! local and pre-commit: no packet, no GCD, no pending arm, only the red line.
+//! ghost, the targeting abort, in-flight, reagents and totems, the equipped item, combo points, the
+//! attack pick, target binding and range, then the validator `0x6094f0` (not-ready and GCD, power,
+//! crowd control, mounted, water, moving, form), the deferred cast-arm refusal and the targeting
+//! cursor. The commit tail follows: ranged stance, auto-repeat arm, the send, the auto-attack start,
+//! the GCD. A refusal is local and pre-commit: no packet, no GCD, no pending arm, only the red line.
 //!
 //! An item use takes the same ladder: `CGItem::Use 0x5d8d00` calls `0x6e5a90`, whose body is
 //! `call 0x6e4b60` with the item as TryCast's third argument (read at `6e4d76` and `6e4f33`). Three
@@ -64,6 +64,22 @@ impl CastCommit {
     }
 }
 
+/// The class byte TryCast's finisher rung tests (`6e4e98`).
+const CLASS_ROGUE: u8 = 4;
+
+/// A player's spell press held at TryCast's attack pick (`6e4edf` → `0x612df0`), which can move
+/// the selection the ladder only reads. [`crate::script_calls`] runs the pick and resumes it.
+#[derive(Resource, Default)]
+pub(crate) struct HeldForPick(Option<HeldCast>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HeldCast {
+    pub(crate) spell_id: u32,
+    /// Pressed with the self-cast modifier: TryCast's guid argument is then the caster
+    /// (`0x4e610e`), which the pick tries before the selection.
+    pub(crate) on_self: bool,
+}
+
 /// Everything the cast-send path reads, as one [`SystemParam`]: [`CastLadder::send`] is the only
 /// way into [`send_spell_cast`], for every caster surface.
 #[derive(SystemParam)]
@@ -86,6 +102,7 @@ pub(crate) struct CastLadder<'w, 's> {
     pub(crate) auto_repeat: ResMut<'w, AutoRepeatActive>,
     pub(crate) trade_skill_opens: ResMut<'w, crate::ui_tradeskill::TradeSkillOpens>,
     pub(crate) ground: ResMut<'w, super::targeting::SpellTargeting>,
+    pub(crate) held_for_pick: ResMut<'w, HeldForPick>,
 }
 
 /// What a targeting-cursor click bound: what `BindLocation 0x6e60f0` or `BindTarget 0x6e5b40`
@@ -189,14 +206,38 @@ impl CastLadder<'_, '_> {
         caster_dead_refusal(spell_id, def, self_store, &mut self.cast_errors)
     }
 
-    /// Run the ladder for `spell_id` and commit as `commit` says.
+    /// Run the ladder for `spell_id` and commit as `commit` says, with no attack pick: no 1.12
+    /// item use, form, craft or `modalNextSpell` chain casts a spell of predicate `0x6e5200`.
     pub(crate) fn send(
         &mut self,
         spell_id: u32,
         ctx: &cast_target::CastContext,
         commit: CastCommit,
     ) {
-        self.send_bound(spell_id, ctx, commit, None);
+        self.send_bound(spell_id, ctx, commit, None, None);
+    }
+
+    /// A player's spell press (`UseAction`, `CastSpell`, `CastSpellByName`): the ladder with
+    /// TryCast's attack pick, where the cast may stop in [`HeldForPick`].
+    pub(crate) fn send_spell(
+        &mut self,
+        spell_id: u32,
+        ctx: &cast_target::CastContext,
+        on_self: bool,
+    ) {
+        let held = HeldCast { spell_id, on_self };
+        self.send_bound(spell_id, ctx, CastCommit::Spell, None, Some(held));
+    }
+
+    /// The press held at the attack pick, if one is.
+    pub(crate) fn take_held(&mut self) -> Option<HeldCast> {
+        self.held_for_pick.0.take()
+    }
+
+    /// A held press after its pick, at the unit the pick left selected. The rungs above the pick
+    /// run again; none reads the selection, so each passes as it did.
+    pub(crate) fn resume_after_pick(&mut self, held: HeldCast, ctx: &cast_target::CastContext) {
+        self.send_bound(held.spell_id, ctx, CastCommit::Spell, None, None);
     }
 
     /// The ladder for a cast the caller already bound to a GameObject (a lock opener): TryCast
@@ -208,7 +249,7 @@ impl CastLadder<'_, '_> {
         ctx: &cast_target::CastContext,
         go_guid: u64,
     ) {
-        self.send_bound(spell_id, ctx, CastCommit::Spell, Some(go_guid));
+        self.send_bound(spell_id, ctx, CastCommit::Spell, Some(go_guid), None);
     }
 
     fn send_bound(
@@ -217,12 +258,14 @@ impl CastLadder<'_, '_> {
         ctx: &cast_target::CastContext,
         commit: CastCommit,
         on_object: Option<u64>,
+        hold: Option<HeldCast>,
     ) {
         send_spell_cast(
             spell_id,
             ctx,
             commit,
             on_object,
+            hold,
             &self.commands,
             &self.self_player,
             self.spells.as_deref(),
@@ -238,6 +281,7 @@ impl CastLadder<'_, '_> {
             &mut self.auto_repeat,
             &mut self.trade_skill_opens,
             &mut self.ground,
+            &mut self.held_for_pick,
         );
     }
 }
@@ -275,6 +319,8 @@ fn send_spell_cast(
     commit: CastCommit,
     // A caller-bound GameObject for a spell commit; an item commit carries its own.
     bound_object: Option<u64>,
+    // Set for a player's spell press, which parks in `held_for_pick` at the attack pick.
+    hold: Option<HeldCast>,
     commands: &NetCommands,
     self_player: &Query<(Entity, Has<crate::creature_anim::Engaged>), With<SelfPlayer>>,
     spells: Option<&Spells>,
@@ -290,6 +336,7 @@ fn send_spell_cast(
     auto_repeat: &mut AutoRepeatActive,
     trade_skill_opens: &mut crate::ui_tradeskill::TradeSkillOpens,
     ground: &mut super::targeting::SpellTargeting,
+    held_for_pick: &mut HeldForPick,
 ) {
     let now = Instant::now();
     let def = spells.and_then(|s| s.catalog.get(spell_id));
@@ -356,6 +403,34 @@ fn send_spell_cast(
                 cast_errors.push_local(spell_id, reason);
                 return;
             }
+        }
+    }
+    // The finisher rung (`6e4e50`–`6e4ecd`), above the attack pick: a finishing move
+    // (`AttributesEx & 0x500000`) with the combo-point byte at 0 refuses 0x46 "That ability
+    // requires combo points" for a rogue (class byte 4, `6e4e98`), else 0x12. Like the button
+    // greying, it reads no target.
+    if let (Some(d), Some(store)) = (def, ctx.rel.self_store) {
+        if d.needs_combo_points() && store.0.player_combo_points().unwrap_or(0) == 0 {
+            let reason = if store.0.unit_class() == Some(CLASS_ROGUE) {
+                0x46
+            } else {
+                0x12
+            };
+            debug!("ui_action: cast {spell_id} refused locally — no combo points ({reason:#x})");
+            cast_errors.push_local(spell_id, reason);
+            return;
+        }
+    }
+    // TryCast's attack pick (`6e4edf`–`6e4f02`): a spell of predicate `0x6e5200`, pressed while
+    // not attacking (`0x60ecb0`), goes through the attack validator `0x612df0`, which keeps a
+    // hostile selection or selects the nearest enemy. It sits above the bind and the range gate,
+    // so an acquired target out of reach reads "Out of range.".
+    if let Some(held) = hold {
+        let engaged = self_player.single().is_ok_and(|(_, engaged)| engaged);
+        if def.is_some_and(|d| d.initiates_combat()) && !engaged {
+            debug!("ui_action: cast {spell_id} holds for the attack pick");
+            held_for_pick.0 = Some(held);
+            return;
         }
     }
     // ArmCast (`0x6e5250`) resolves the wire target from the spell's targeting constraints, never
@@ -754,6 +829,7 @@ mod tests {
         world.init_resource::<AutoRepeatActive>();
         world.init_resource::<crate::ui_tradeskill::TradeSkillOpens>();
         world.init_resource::<crate::spell::SpellTargeting>();
+        world.init_resource::<crate::spell::HeldForPick>();
         // A bare World has no message storage until it is asked for.
         world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
         world.init_resource::<Messages<crate::player::StandStateRequest>>();
@@ -926,11 +1002,13 @@ mod tests {
     const AUTO_SHOT: u32 = 75;
     const RAPTOR_STRIKE: u32 = 2973;
     const SERPENT_STING: u32 = 1978;
+    const EVISCERATE: u32 = 2098;
     const MOB: u64 = 0x0000_0000_0000_00f1;
 
     /// Auto Shot (auto-repeat `AttributesEx2 & 0x20`, ranged `Attributes & 0x2`), Raptor Strike
-    /// (on-next-swing `0x404`) and Serpent Sting, as the 1.12 rows classify them. `Targets & 0x2`
-    /// binds the selection without faction data.
+    /// (on-next-swing `0x404`), Serpent Sting and Eviscerate (a finisher, `AttributesEx 0x100000`,
+    /// that starts combat, `0x200`), as the 1.12 rows classify them. `Targets & 0x2` binds the
+    /// selection without faction data.
     fn combat_catalog() -> Spells {
         use std::collections::HashMap;
         let auto_shot = benilla_formats::SpellDisplay {
@@ -953,11 +1031,17 @@ mod tests {
             modal_next_spell: AUTO_SHOT,
             ..Default::default()
         };
+        let eviscerate = benilla_formats::SpellDisplay {
+            targets: 0x2,
+            attributes_ex: 0x0010_0200,
+            ..Default::default()
+        };
         Spells {
             catalog: benilla_formats::SpellCatalog::from_displays(HashMap::from([
                 (AUTO_SHOT, auto_shot),
                 (RAPTOR_STRIKE, raptor_strike),
                 (SERPENT_STING, serpent_sting),
+                (EVISCERATE, eviscerate),
             ])),
             ..Spells::empty_for_tests()
         }
@@ -1074,6 +1158,90 @@ mod tests {
                 ladder.send(spell_id, &ctx, CastCommit::Spell);
             })
             .expect("the ladder runs as a one-shot system");
+    }
+
+    /// TryCast's attack pick (`6e4edf`): a press of a `0x6e5200` spell stops there, above the
+    /// bind, for its owner to pick a unit. Attacking skips the pick (`0x60ecb0`), and neither a
+    /// spell without the bits nor a send that is not a press stops.
+    #[test]
+    fn a_combat_press_holds_at_the_attack_pick_unless_attacking() {
+        let press = |world: &mut World, spell_id: u32| {
+            world
+                .run_system_once(move |mut ladder: CastLadder| {
+                    ladder.send_spell(spell_id, &ctx(), false);
+                    ladder.take_held()
+                })
+                .expect("the ladder runs as a one-shot system")
+        };
+        let (mut world, rx) = combat_world(false);
+        assert_eq!(
+            press(&mut world, RAPTOR_STRIKE),
+            Some(HeldCast {
+                spell_id: RAPTOR_STRIKE,
+                on_self: false
+            })
+        );
+        assert!(rx.try_recv().is_err(), "a held press sends nothing");
+        assert!(world.resource::<CastErrors>().0.is_empty());
+        assert_eq!(press(&mut world, SERPENT_STING), None, "no 0x6e5200 bit");
+
+        let (mut world, _rx) = combat_world(true);
+        assert_eq!(press(&mut world, RAPTOR_STRIKE), None, "attacking");
+
+        let (mut world, _rx) = combat_world(false);
+        send(&mut world, RAPTOR_STRIKE, CastCommit::Spell);
+        assert_eq!(world.resource::<HeldForPick>().0, None, "not a press");
+    }
+
+    /// The rungs above the pick refuse before it: a press mid-cast (`6e4d97`) and a finisher with no
+    /// combo points (`6e4e50`) hold nothing, so they never select a unit. A rogue reads 0x46, any
+    /// other class 0x12 (`6e4e98`).
+    #[test]
+    fn the_rungs_above_the_attack_pick_refuse_before_it() {
+        use benilla_protocol::ObjectFields;
+        let (mut world, rx) = combat_world(false);
+        world
+            .resource_mut::<crate::spell::PendingCast>()
+            .arm(SERPENT_STING, Instant::now(), true);
+        let held = world
+            .run_system_once(|mut ladder: CastLadder| {
+                ladder.send_spell(RAPTOR_STRIKE, &ctx(), false);
+                ladder.take_held()
+            })
+            .expect("the ladder runs as a one-shot system");
+        assert_eq!(held, None, "in flight");
+        assert_eq!(
+            world.resource::<CastErrors>().0,
+            vec![CastFail::local(RAPTOR_STRIKE, 0x61)]
+        );
+        assert!(rx.try_recv().is_err());
+
+        // `UNIT_FIELD_BYTES_0` (field 36) byte 1 is the class; `PLAYER_FIELD_BYTES` holds no
+        // combo points.
+        for (class, reason) in [(4u32, 0x46), (11, 0x12)] {
+            let (mut world, rx) = combat_world(false);
+            let held = world
+                .run_system_once(move |mut ladder: CastLadder| {
+                    let me = crate::net::ObjectStore(ObjectFields::from_pairs(&[(36, class << 8)]));
+                    let ctx = cast_target::CastContext {
+                        rel: cast_target::TargetRelations {
+                            self_store: Some(&me),
+                            ..ctx().rel
+                        },
+                        ..ctx()
+                    };
+                    ladder.send_spell(EVISCERATE, &ctx, false);
+                    ladder.take_held()
+                })
+                .expect("the ladder runs as a one-shot system");
+            assert_eq!(held, None, "class {class}: no combo points");
+            assert_eq!(
+                world.resource::<CastErrors>().0,
+                vec![CastFail::local(EVISCERATE, reason)],
+                "class {class}"
+            );
+            assert!(rx.try_recv().is_err());
+        }
     }
 
     /// The commit's StopAttack (`0x6e5976`): `CMSG_ATTACKSTOP` (`0x624370`), then `CancelQueuedCast
