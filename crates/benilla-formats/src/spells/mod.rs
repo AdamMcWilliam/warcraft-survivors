@@ -20,6 +20,7 @@ mod duration;
 mod forms;
 mod radius;
 mod ranges;
+mod soft_float;
 mod tokens;
 
 pub use cast_times::{load_spell_cast_times, SpellCastTime, SpellCastTimeCatalog};
@@ -34,7 +35,8 @@ pub use ranges::{
     load_spell_ranges, min_max_range, SpellRange, SpellRangeCatalog, COMBAT_REACH_ADD,
     MELEE_RANGE_FLOOR, ON_NEXT_SWING_RANGE,
 };
-pub use tokens::{substitute, TokenContext};
+pub use soft_float::modify as soft_modify;
+pub use tokens::{substitute, SpellMods, TokenContext, TokenNumber};
 
 use std::collections::HashMap;
 
@@ -156,7 +158,9 @@ const COL_AURA_DESCRIPTION_ENUS: usize = 147;
 const COL_DURATION_INDEX: usize = 30;
 /// `CastingTimeIndex` (`+0x48`): `Spell_C::GetCastTime` (`0x6e3340`) looks it up at `0xc0d878`.
 const COL_CASTING_TIME_INDEX: usize = 18;
+const COL_PROC_FLAGS: usize = 24;
 const COL_PROC_CHANCE: usize = 25;
+const COL_PROC_CHARGES: usize = 26;
 
 /// The per-effect `[3]` arrays, each constant slot 0; die sides and base points are signed.
 const COL_EFFECT_DIE_SIDES_1: usize = 64;
@@ -561,7 +565,9 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 aura_description: str_at(&spells_set, r, COL_AURA_DESCRIPTION_ENUS),
                 duration_index: u32_at(r, COL_DURATION_INDEX).unwrap_or(0),
                 casting_time_index: u32_at(r, COL_CASTING_TIME_INDEX).unwrap_or(0),
+                proc_flags: u32_at(r, COL_PROC_FLAGS).unwrap_or(0),
                 proc_chance: u32_at(r, COL_PROC_CHANCE).unwrap_or(0),
+                proc_charges: u32_at(r, COL_PROC_CHARGES).unwrap_or(0),
                 effect_base_points: std::array::from_fn(|i| {
                     i32_at(r, COL_EFFECT_BASE_POINTS_1 + i).unwrap_or(0)
                 }),

@@ -8,37 +8,26 @@ struct TestCtx {
     items: Items,
     commands: NetCommands,
     _rx: crossbeam_channel::Receiver<crate::net::ClientCommand>,
-    /// The builder's two lookups, over the shipped `GlobalStrings.lua`: a stub would pass on
-    /// wording the client never shows.
+    /// The builder's lookup over the shipped `GlobalStrings.lua`: a stub would pass on wording
+    /// the client never shows.
     get: Box<Getter>,
-    text: Box<Filler>,
-    /// Empty: every cell here is graded as an untalented character.
+    /// Empty by default; modifier tests populate it explicitly.
     spell_mods: crate::spell::SpellModifiers,
 }
 
 type Getter = dyn Fn(&str) -> Option<String>;
-type Filler = dyn Fn(&str, &[i64]) -> Option<String>;
 
 impl TestCtx {
     fn new() -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let vm = std::rc::Rc::new(benilla_ui::script::UiScript::new().expect("VM"));
+        let vm = benilla_ui::script::UiScript::new().expect("VM");
         crate::ui_script::load_ui_for_test(&vm, "Interface\\FrameXML\\GlobalStrings.lua");
-        let (for_get, for_text) = (vm.clone(), vm);
         Self {
             items: Items::default(),
             commands: NetCommands(tx),
             _rx: rx,
-            get: Box::new(move |key| benilla_ui::strings::global(for_get.lua(), key)),
+            get: Box::new(move |key| benilla_ui::strings::global(vm.lua(), key)),
             spell_mods: crate::spell::SpellModifiers::default(),
-            text: Box::new(move |key, args: &[i64]| {
-                let template = benilla_ui::strings::global(for_text.lua(), key)?;
-                let args: Vec<_> = args
-                    .iter()
-                    .map(|n| benilla_ui::strings::Arg::D(*n))
-                    .collect();
-                Some(benilla_ui::strings::fill(&template, &args))
-            }),
         }
     }
 
@@ -81,7 +70,6 @@ impl TestCtx {
             sub_classes,
             spell_mods: &self.spell_mods,
             get: self.get.as_ref(),
-            text: self.text.as_ref(),
         }
     }
 }
@@ -175,6 +163,104 @@ fn fireball_view_on_real_data() {
         let v = spell_tooltip_view(id, &spells, &mut t.ctx(&objects, 0, None)).expect(name);
         assert_eq!(v.requires_form, None, "{name} demands no form");
     }
+}
+
+/// Improved Devotion Aura's +25% on op 8 reaches the spell's description, 55 armor to 68; the
+/// aura text expands as the aura tooltip `0x52f880` expands it, with the points' modifiers off
+/// (`52f940`), so it keeps 55.
+#[test]
+fn improved_devotion_aura_updates_the_description_but_not_the_aura_text() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let mut spells = Spells::empty_for_tests();
+    spells.catalog = benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc");
+    spells.ranges = benilla_formats::load_spell_ranges(&mut chain).expect("SpellRange.dbc");
+    spells.durations =
+        benilla_formats::load_spell_durations(&mut chain).expect("SpellDuration.dbc");
+    spells.radii = benilla_formats::load_spell_radii(&mut chain).expect("SpellRadius.dbc");
+    let devotion = spells.catalog.get(465).expect("Devotion Aura rank 1");
+    let bit = devotion.spell_family_flags.trailing_zeros() as u8;
+    let mut t = TestCtx::new();
+    let mut objs = no_objects();
+    let objects = objs.get();
+    let base = spell_tooltip_view(465, &spells, &mut t.ctx(&objects, 0, None)).unwrap();
+    assert!(base.description.contains("55 additional armor"));
+    assert!(base.aura_description.contains("55"));
+
+    t.spell_mods.set_class_family(devotion.spell_family);
+    t.spell_mods.set(false, bit, 8, 25);
+    let improved = spell_tooltip_view(465, &spells, &mut t.ctx(&objects, 0, None)).unwrap();
+    assert!(improved.description.contains("68 additional armor"));
+    assert_eq!(improved.aura_description, base.aura_description);
+}
+
+/// Fire Blast rank 1's 8 s is its category recovery, its own recovery 0; Improved Fire Blast's
+/// flat op 11 shortens the category value, and the cell shows the larger column (`0x52eada`).
+#[test]
+fn improved_fire_blast_shortens_the_cooldown_cell() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let mut spells = Spells::empty_for_tests();
+    spells.catalog = benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc");
+    let fire_blast = spells.catalog.get(2136).expect("Fire Blast rank 1");
+    assert_eq!(
+        (fire_blast.recovery_ms, fire_blast.category_recovery_ms),
+        (0, 8_000)
+    );
+    let bit = fire_blast.spell_family_flags.trailing_zeros() as u8;
+    let mut t = TestCtx::new();
+    let mut objs = no_objects();
+    let objects = objs.get();
+    let base = spell_tooltip_view(2136, &spells, &mut t.ctx(&objects, 0, None)).unwrap();
+    assert_eq!(base.cooldown.as_deref(), Some("8 sec cooldown"));
+
+    t.spell_mods.set_class_family(fire_blast.spell_family);
+    t.spell_mods
+        .set(true, bit, crate::spell::OP_COOLDOWN, -1_500);
+    let improved = spell_tooltip_view(2136, &spells, &mut t.ctx(&objects, 0, None)).unwrap();
+    assert_eq!(improved.cooldown.as_deref(), Some("6.5 sec cooldown"));
+}
+
+/// The cast cell reads `GetCastTime(1)` (`52eb4b`): op 10 applies and nothing clamps, so a
+/// modifier past the whole cast time reaches the negative "Instant cast" arm (`0x52ebce`), where
+/// a clamped zero would take the no-mana "Instant" (`0x52ec4b`).
+#[test]
+fn the_cast_cell_takes_op_10_unclamped() {
+    // The cells fill the install's `GlobalStrings.lua`.
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut spells = Spells::empty_for_tests();
+    let rage_cast = benilla_formats::SpellDisplay {
+        name: "Rage Cast".into(),
+        casting_time_index: 5,
+        power_type: 1,
+        spell_family: 4,
+        spell_family_flags: 1,
+        ..Default::default()
+    };
+    spells.catalog =
+        benilla_formats::SpellCatalog::from_displays([(900_001, rage_cast)].into_iter().collect());
+    spells.cast_times = benilla_formats::SpellCastTimeCatalog::from_rows([(
+        5,
+        benilla_formats::SpellCastTime {
+            base_ms: 1500,
+            per_level_ms: 0,
+            minimum_ms: 1500,
+        },
+    )]);
+    let mut objs = no_objects();
+    let objects = objs.get();
+    let cell = |flat: i32| {
+        let mut t = TestCtx::new();
+        t.spell_mods.set_class_family(4);
+        t.spell_mods.set(true, 0, crate::spell::OP_CAST_TIME, flat);
+        spell_tooltip_view(900_001, &spells, &mut t.ctx(&objects, 0, None))
+            .unwrap()
+            .cast_time
+    };
+    assert_eq!(cell(0).as_deref(), Some("1.5 sec cast"));
+    assert_eq!(cell(-500).as_deref(), Some("1 sec cast"));
+    assert_eq!(cell(-1500).as_deref(), Some("Instant"), "exactly zero");
+    assert_eq!(cell(-2000).as_deref(), Some("Instant cast"), "below zero");
 }
 
 #[test]

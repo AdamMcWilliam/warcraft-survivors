@@ -97,6 +97,7 @@ fn feed_craft(
     open: Res<CraftOpen>,
     actions: Res<PlayerActions>,
     spells: Option<Res<Spells>>,
+    spell_mods: Res<crate::spell::SpellModifiers>,
     skill_lines: Option<Res<SkillLines>>,
     focus: Option<Res<SpellFocus>>,
     icons: Option<Res<ItemDisplays>>,
@@ -123,13 +124,17 @@ fn feed_craft(
             .line(line)
             .map(|l| l.name.clone())
             .unwrap_or_else(|| format!("Skill {line}"));
-        let text = crate::ui_script::token_text(&script);
+        let global = |key: &str| benilla_ui::strings::global(script.lua(), key);
         let ctx = benilla_formats::TokenContext {
             durations: &spells.durations,
             radii: &spells.radii,
+            ranges: Some(&spells.ranges),
             lookup: &|id| spells.catalog.get(id),
+            mods: Some(&*spell_mods),
+            unmodified_points: false,
             home_area: None,
-            text: &text,
+            global: &global,
+            printf: &crate::ui_script::token_printf,
         };
         // Admission (`0x5e9c20`): known, not hidden (`Attributes & 0x20`), and `castUI` equal to
         // the craft type. The client walks its per-type list (`CGPlayer_C + 0x1cd0 + 0x10*type`)

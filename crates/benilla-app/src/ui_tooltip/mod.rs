@@ -57,10 +57,8 @@ struct ViewCtx<'a, 'w, 's> {
     sub_classes: Option<&'a benilla_formats::ItemSubClassCatalog>,
     /// The talent spell-modifier tables: the cost cell shows the modified cost (`power_cost`).
     spell_mods: &'a crate::spell::SpellModifiers,
-    /// The VM's `GlobalStrings.lua`, where the keyed cells resolve; `text` is the `%d`-filling form
-    /// the `$` tokens take.
+    /// The VM's `GlobalStrings.lua`, where the keyed cells and the `$` tokens' templates resolve.
     get: &'a dyn Fn(&str) -> Option<String>,
-    text: &'a dyn Fn(&str, &[i64]) -> Option<String>,
 }
 
 /// Fill a key's template from the VM's `GlobalStrings.lua`; no string shows nothing.
@@ -84,9 +82,18 @@ fn spell_tooltip_view(
     let ctx = benilla_formats::TokenContext {
         durations: &spells.durations,
         radii: &spells.radii,
+        ranges: Some(&spells.ranges),
         lookup: &|id| spells.catalog.get(id),
+        mods: Some(vctx.spell_mods),
+        unmodified_points: false,
         home_area,
-        text: vctx.text,
+        global: vctx.get,
+        printf: &crate::ui_script::token_printf,
+    };
+    // The aura tooltip `0x52f880` expands the aura text with the points' modifiers off (`52f940`).
+    let aura_ctx = benilla_formats::TokenContext {
+        unmodified_points: true,
+        ..ctx
     };
     // The cost cell (`0x52e8ad`): the resolved `power_cost`, named by power type (keys at
     // `0x85416c`) and Health for a type outside 0..=4 (`0x52e8fc`: Bloodrage's -2), never a
@@ -123,7 +130,7 @@ fn spell_tooltip_view(
     // `max(reach + casterReach + 1.3333334, 5.0)` and prints like any other, usually "5 yd range".
     let range = (!d.tooltip_omits_range_line())
         .then(|| {
-            let (min, max) = benilla_formats::min_max_range(
+            let (min, max) = vctx.spell_mods.min_max_range(
                 d,
                 spells.ranges.get(d.range_index),
                 vctx.combat_reach,
@@ -144,16 +151,14 @@ fn spell_tooltip_view(
         })
         .flatten();
     // The cast line: gate `0x52eb15` also omits it for a TRADE_SKILL or ATTACK `Effect[0]`; then
-    // the ladder `0x52eb45`-`0x52ec90`, where a negative base is "Instant cast" (`0x52ebce`) and a
-    // zero one is "Instant cast" only for a mana spell with a cost (`0x52ec4b`).
+    // the ladder `0x52eb45`-`0x52ec90` over `GetCastTime(1)` (`52eb4d`), unclamped, where a
+    // negative time is "Instant cast" (`0x52ebce`) and a zero one is "Instant cast" only for a
+    // mana spell with a cost (`0x52ec4b`).
     let cast_time = if d.tooltip_omits_cast_line() {
         None
     } else {
-        let base = spells
-            .cast_times
-            .get(d.casting_time_index)
-            .map(|c| c.base_ms as i32)
-            .unwrap_or(0);
+        let level = vctx.store.and_then(|s| s.0.unit_level()).unwrap_or(0);
+        let base = spells.cast_time_unclamped_ms(d, level, vctx.spell_mods);
         // `%.3g` templates: the seconds go over as a real.
         if base > 0 {
             let (key, v) = if base >= 60_000 {
@@ -179,8 +184,16 @@ fn spell_tooltip_view(
             keyed(vctx.get, key, &[])
         }
     };
-    // The larger recovery column (`0x52eada`): Charge's 15 s is its category recovery.
-    let recovery_ms = d.recovery_ms.max(d.category_recovery_ms);
+    // The larger recovery column (`0x52eada`): op 11 follows the ranged-speed category pad.
+    let ranged_ms = if d.ranged_speed_cooldown() {
+        vctx.store
+            .and_then(|s| s.0.unit_ranged_attack_time())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let (own_recovery, category_recovery) = vctx.spell_mods.spell_cooldowns(d, ranged_ms);
+    let recovery_ms = own_recovery.max(category_recovery);
     let cooldown = (recovery_ms > 0)
         .then(|| {
             let secs = f64::from(recovery_ms) / 1000.0;
@@ -277,7 +290,7 @@ fn spell_tooltip_view(
         aura_description: d
             .aura_description
             .as_deref()
-            .map(|t| benilla_formats::substitute(t, d, &ctx))
+            .map(|t| benilla_formats::substitute(t, d, &aura_ctx))
             .unwrap_or_default(),
     })
 }
@@ -489,7 +502,6 @@ fn feed_spell_tooltips(
     let mut built: Vec<(u32, benilla_ui::script::SpellTooltipView)> = Vec::new();
     {
         let get = |key: &str| benilla_ui::strings::global(script.lua(), key);
-        let text = crate::ui_script::token_text(&script);
         let mut vctx = ViewCtx {
             home_area: home_area.as_deref(),
             form,
@@ -502,7 +514,6 @@ fn feed_spell_tooltips(
             sub_classes: sub_classes.as_deref().map(|c| &c.0),
             spell_mods,
             get: &get,
-            text: &text,
         };
         for id in wanted {
             if let Some(view) = spell_tooltip_view(id, spells, &mut vctx) {

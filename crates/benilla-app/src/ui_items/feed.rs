@@ -1,7 +1,7 @@
 //! The per-frame feeds into the VM: the container snapshots built from the player's descriptor,
 //! and the item-tooltip views every window reads.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 
@@ -58,8 +58,9 @@ fn spell_desc_text(
     spells: Option<&crate::ui_action::Spells>,
     id: u32,
     home_area: Option<&str>,
+    mods: Option<&crate::spell::SpellModifiers>,
     // The VM's strings for the keyed `$d`/`$s` tokens.
-    text: &dyn Fn(&str, &[i64]) -> Option<String>,
+    global: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
     let sp = spells?;
     let d = sp.catalog.get(id)?;
@@ -69,14 +70,41 @@ fn spell_desc_text(
             let ctx = benilla_formats::TokenContext {
                 durations: &sp.durations,
                 radii: &sp.radii,
+                ranges: Some(&sp.ranges),
                 lookup: &|i| sp.catalog.get(i),
+                mods: mods.map(|m| m as &dyn benilla_formats::SpellMods),
+                unmodified_points: false,
                 home_area,
-                text,
+                global,
+                printf: &crate::ui_script::token_printf,
             };
             Some(benilla_formats::substitute(desc, d, &ctx)).filter(|t| !t.is_empty())
         }
         None => None,
     }
+}
+
+/// Only descriptions with substitution tokens can change when the caster's spell mods change.
+fn spell_has_mod_tokens(spells: Option<&crate::ui_action::Spells>, id: u32) -> bool {
+    spells
+        .and_then(|s| s.catalog.get(id))
+        .and_then(|d| d.description.as_deref())
+        .is_some_and(|desc| desc.contains('$'))
+}
+
+fn item_has_mod_tokens(t: &ItemInfo, spells: Option<&crate::ui_action::Spells>) -> bool {
+    t.spells
+        .iter()
+        .any(|slot| slot.spell_id != 0 && spell_has_mod_tokens(spells, slot.spell_id))
+}
+
+fn bonuses_have_mod_tokens(
+    bonuses: &[(u32, u32)],
+    spells: Option<&crate::ui_action::Spells>,
+) -> bool {
+    bonuses
+        .iter()
+        .any(|&(_, spell)| spell_has_mod_tokens(spells, spell))
 }
 
 /// The tooltip's "N Charges" count, 0 for no line. The builder (`0x52d8a0`) reads a template 0 as
@@ -102,23 +130,23 @@ fn standing_label(rank: u32, get: &dyn Fn(&str) -> Option<String>) -> Option<Str
 fn template_view(
     t: &ItemInfo,
     spells: Option<&crate::ui_action::Spells>,
+    mods: Option<&crate::spell::SpellModifiers>,
     skill_lines: Option<&benilla_formats::SkillLineCatalog>,
     home_area: Option<&str>,
     factions: Option<&benilla_formats::FactionCatalog>,
     sub_classes: Option<&benilla_formats::ItemSubClassCatalog>,
     classes: Option<&benilla_formats::ItemClassCatalog>,
     icons: Option<&ItemDisplays>,
-    // The VM's own `GlobalStrings.lua`, for the reputation-requirement line.
+    // The VM's own `GlobalStrings.lua`, for the reputation-requirement line and the `$`-engine's
+    // keyed tokens.
     get: &dyn Fn(&str) -> Option<String>,
-    // The same table, for the `$`-engine's keyed tokens.
-    text: &dyn Fn(&str, &[i64]) -> Option<String>,
 ) -> benilla_ui::script::ItemTemplateView {
     let spell_name = |id: u32| -> Option<String> {
         spells
             .and_then(|s| s.catalog.get(id))
             .map(|sd| sd.name.clone())
     };
-    let spell_text = |id: u32| spell_desc_text(spells, id, home_area, text);
+    let spell_text = |id: u32| spell_desc_text(spells, id, home_area, mods, get);
     benilla_ui::script::ItemTemplateView {
         name: t.name.clone(),
         quality: t.quality,
@@ -215,17 +243,25 @@ pub(super) fn feed_item_sets(
     items: Res<Items>,
     commands: Res<NetCommands>,
     spells: Option<Res<crate::ui_action::Spells>>,
+    spell_mods: Res<crate::spell::SpellModifiers>,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
     mut pending: Local<
         crate::ui_script::VmMemo<std::collections::HashMap<u32, benilla_ui::script::ItemSetView>>,
     >,
+    mut mod_sensitive: Local<crate::ui_script::VmMemo<HashSet<u32>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
     let pending = pending.get(&script);
+    let mod_sensitive = mod_sensitive.get(&script);
     for id in script.take_item_set_asks() {
         pending.entry(id).or_default();
+    }
+    if spell_mods.is_changed() {
+        for &id in mod_sensitive.iter() {
+            pending.entry(id).or_default();
+        }
     }
     if pending.is_empty() {
         return;
@@ -237,13 +273,18 @@ pub(super) fn feed_item_sets(
     let skill_catalog = skill_lines.as_deref().map(|s| &s.catalog);
     let mut done: Vec<u32> = Vec::new();
     let mut push: Vec<(u32, benilla_ui::script::ItemSetView)> = Vec::new();
-    // Dropped before the push, which needs the VM mutably.
-    let token_text = crate::ui_script::token_text(&script);
+    // Its borrow of the VM ends before the push, which needs the VM mutably.
+    let global = |key: &str| benilla_ui::strings::global(script.lua(), key);
     for (&set_id, last) in pending.iter_mut() {
         let Some(row) = sets.0.set(set_id) else {
             done.push(set_id); // no such row: drop the ask
             continue;
         };
+        if bonuses_have_mod_tokens(&row.bonuses, spell_res) {
+            mod_sensitive.insert(set_id);
+        } else {
+            mod_sensitive.remove(&set_id);
+        }
         let members: Vec<(u32, Option<String>)> = row
             .items
             .iter()
@@ -255,7 +296,8 @@ pub(super) fn feed_item_sets(
                 .bonuses
                 .iter()
                 .filter_map(|&(n, spell)| {
-                    spell_desc_text(spell_res, spell, None, &token_text).map(|desc| (n, desc))
+                    spell_desc_text(spell_res, spell, None, Some(&spell_mods), &global)
+                        .map(|desc| (n, desc))
                 })
                 .collect(),
             required_skill: row.required_skill,
@@ -277,7 +319,6 @@ pub(super) fn feed_item_sets(
             push.push((set_id, view));
         }
     }
-    drop(token_text);
     for (id, view) in push {
         script.set_item_set(id, view);
     }
@@ -322,6 +363,7 @@ pub(super) fn feed_item_stats(
     mut items: ResMut<Items>,
     commands: Res<NetCommands>,
     spells: Option<Res<crate::ui_action::Spells>>,
+    spell_mods: Res<crate::spell::SpellModifiers>,
     skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
     // The `$z` token: the bind point's area (`SMSG_BINDPOINTUPDATE`), named through `AreaTable`.
     home_bind: Option<Res<crate::net::HomeBind>>,
@@ -332,12 +374,14 @@ pub(super) fn feed_item_stats(
     classes: Option<Res<super::ItemClasses>>,
     icons: Option<Res<ItemDisplays>>,
     mut pending: Local<crate::ui_script::VmMemo<std::collections::HashSet<u32>>>,
+    mut mod_sensitive: Local<crate::ui_script::VmMemo<HashSet<u32>>>,
     mut last_home: Local<crate::ui_script::VmMemo<Option<String>>>,
 ) {
     let Some(mut script) = script else {
         return;
     };
     let pending = pending.get(&script);
+    let mod_sensitive = mod_sensitive.get(&script);
     let last_home = last_home.get(&script);
     // `GetBindLocation()`'s push, here so it and the `$z` token share one name, and ahead of the
     // pending gate below: the bind point can arrive while the feed idles.
@@ -355,6 +399,9 @@ pub(super) fn feed_item_stats(
 
     pending.extend(items.take_fresh());
     pending.extend(script.take_item_stat_asks());
+    if spell_mods.is_changed() {
+        pending.extend(mod_sensitive.iter().copied());
+    }
     if pending.is_empty() {
         return;
     }
@@ -380,11 +427,17 @@ pub(super) fn feed_item_stats(
             .filter_map(|id| {
                 pending.remove(&id);
                 let t = items.template(id, 0, &commands)?.clone();
+                if item_has_mod_tokens(&t, spell_res) {
+                    mod_sensitive.insert(id);
+                } else {
+                    mod_sensitive.remove(&id);
+                }
                 Some((
                     id,
                     template_view(
                         &t,
                         spell_res,
+                        Some(&spell_mods),
                         skill_catalog,
                         home_area,
                         factions.as_deref().map(|f| f.catalog()),
@@ -392,7 +445,6 @@ pub(super) fn feed_item_stats(
                         classes.as_deref().map(|c| &c.0),
                         icons.as_deref(),
                         &get,
-                        &crate::ui_script::token_text(&script),
                     ),
                 ))
             })
@@ -1778,6 +1830,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn modifier_refresh_tracks_only_item_and_set_descriptions_with_tokens() {
+        let displays = std::collections::HashMap::from([
+            (
+                1,
+                benilla_formats::SpellDisplay {
+                    description: Some("Restores 5 health.".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                2,
+                benilla_formats::SpellDisplay {
+                    description: Some("Restores $s1 health.".into()),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let spells = crate::ui_action::Spells {
+            catalog: benilla_formats::SpellCatalog::from_displays(displays),
+            forms: Default::default(),
+            ranges: Default::default(),
+            cast_times: Default::default(),
+            durations: Default::default(),
+            radii: Default::default(),
+        };
+        let mut item = crate::items::test_template("Token item");
+        item.spells = vec![slot(1, 0)];
+        assert!(!super::item_has_mod_tokens(&item, Some(&spells)));
+        item.spells.push(slot(2, 0));
+        assert!(super::item_has_mod_tokens(&item, Some(&spells)));
+        assert!(!super::bonuses_have_mod_tokens(&[(2, 1)], Some(&spells)));
+        assert!(super::bonuses_have_mod_tokens(
+            &[(2, 1), (4, 2)],
+            Some(&spells)
+        ));
+    }
+
     /// The builder's charge gate (`0x52da01`, `0x52db51`).
     #[test]
     fn charge_gate_matches_the_real_builder() {
@@ -1812,7 +1902,7 @@ mod tests {
         };
 
         // No string table: Fireball's description reaches no keyed token.
-        let no_strings = |_: &str, _: &[i64]| None;
+        let no_strings = |_: &str| None;
 
         // The lock chain's Opening and Closing spells, none with a description.
         for id in [3365u32, 3366, 6246, 6247, 6477, 21651] {
@@ -1822,7 +1912,7 @@ mod tests {
                 "spell {id} has a name — which is exactly what must NOT leak into the tooltip"
             );
             assert_eq!(
-                super::spell_desc_text(Some(&spells), id, None, &no_strings),
+                super::spell_desc_text(Some(&spells), id, None, None, &no_strings),
                 None,
                 "spell {id} ({:?}) has no description, so the reference prints no trigger line",
                 d.name
@@ -1830,7 +1920,7 @@ mod tests {
         }
 
         // The control: Fireball (133), described, still yields its line.
-        let fireball = super::spell_desc_text(Some(&spells), 133, None, &no_strings)
+        let fireball = super::spell_desc_text(Some(&spells), 133, None, None, &no_strings)
             .expect("a described spell still yields its line");
         assert!(
             fireball.contains("damage"),
