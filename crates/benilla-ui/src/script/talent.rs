@@ -8,11 +8,14 @@
 //! `TALENT_BRANCH_ARRAY[tier][column]`. The respec pair answers a class trainer's
 //! `CONFIRM_TALENT_WIPE` and reads no snapshot.
 //!
-//! `GameTooltip:SetTalent` is the spell builder (`0x52e610`) with talent lines: the rank line
-//! (`TOOLTIP_TALENT_RANK`, `0x854a2c`), the red requirement lines after it, and "Click to learn"
-//! (`TOOLTIP_TALENT_LEARN`, `0x8549f8`) in green on a learnable rank. The "Next rank:" block,
-//! `TOOLTIP_TALENT_NEXT_RANK` in white and the next rank's description in gold, is untraced in
-//! the reference.
+//! `GameTooltip:SetTalent` (`0x535170`) builds an exceptional talent with the spell builder
+//! (`0x52e610`) and any other with the talent builder (`0x52b0a0`), which keeps the spell's name
+//! and description and drops the rest of its body. The talent lines are the talent builder's: the
+//! rank line (`TOOLTIP_TALENT_RANK`, `0x854a2c`), the red requirement lines after it, the "Next
+//! rank:" block (`TOOLTIP_TALENT_NEXT_RANK`, `0x854a10`, white, over the next rank's gold
+//! description) and "Click to learn" (`TOOLTIP_TALENT_LEARN`, `0x8549f8`) in green on a learnable
+//! rank. The spell builder writes the same lines around the full body (`0x52f735`); its next-rank
+//! pass, a second full body, never runs, as no 1.12 exceptional talent has a second rank.
 
 use mlua::{Lua, MultiValue, Table, Value};
 
@@ -272,6 +275,7 @@ pub(super) fn install_tooltip_method(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 (
                     t.display_spell,
                     TalentLines {
+                        exceptional: t.exceptional,
                         rank_line,
                         reqs: t.req_lines.clone(),
                         next_spell: t.next_spell,

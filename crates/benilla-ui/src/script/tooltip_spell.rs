@@ -227,6 +227,10 @@ pub(super) fn spell_view_of(lua: &Lua, spell_id: u32) -> Option<SpellTooltipView
 /// while locked, the next-rank block and the green learn hint.
 #[derive(Clone, Debug, Default)]
 pub(super) struct TalentLines {
+    /// `Talent.dbc` Flags bit 0: `SetTalent` hands an exceptional talent to the spell builder
+    /// `0x52e610` (`0x5352ab`) and any other to the talent builder `0x52b0a0`, which writes no
+    /// cost, range, cast, required-item, form, reagent or chance line.
+    pub exceptional: bool,
     /// `TOOLTIP_TALENT_RANK` ("Rank %d/%d") filled from the player's strings; `None` when they
     /// lack the key, and no rank row shows.
     pub rank_line: Option<String>,
@@ -275,6 +279,7 @@ fn render_spell(
         v.rank.clone().filter(|_| show_rank).map(|t| (t, GRAY))
     };
     append_line(lua, this, (v.name.clone(), name_color), right, false)?;
+    let talent_builder = talent.is_some_and(|t| !t.exceptional);
     // The talent head: the white rank line, then the red requirements while locked.
     if let Some(t) = talent {
         if let Some(rank) = &t.rank_line {
@@ -284,7 +289,7 @@ fn render_spell(
             append_line(lua, this, (req.clone(), RED), None, true)?;
         }
     }
-    if !aura {
+    if !aura && !talent_builder {
         match (&v.cost, &v.range) {
             (Some(c), Some(r)) => append_line(
                 lua,
@@ -340,7 +345,16 @@ fn render_spell(
     // `0x52b2cd`) over the next rank's gold description, then the green `TOOLTIP_TALENT_LEARN`
     // hint (`0x52b362`). Both are the player's own strings; without them the line is skipped.
     if let Some(t) = talent {
-        if let Some(next) = &t.next_desc {
+        // The talent builder skips a rank with an empty description, header and all (`0x52b294`).
+        let next = t
+            .next_desc
+            .as_ref()
+            .filter(|n| !talent_builder || !n.is_empty());
+        if let Some(next) = next {
+            // The talent builder's gold `" "` spacer (`0x82ee00`, `0x52b2a8`) after a description.
+            if talent_builder && !desc.is_empty() {
+                append_line(lua, this, (" ".into(), GOLD), None, false)?;
+            }
             if let Some(header) = crate::strings::global(lua, "TOOLTIP_TALENT_NEXT_RANK") {
                 append_line(lua, this, (header, WHITE), None, false)?;
             }
