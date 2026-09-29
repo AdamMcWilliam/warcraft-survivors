@@ -431,7 +431,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "RepairAllItems",
         lua.create_function(|lua, ()| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.repair_all = true;
+            // `0x4fbff0`: nothing, not even the purse test, unless the open merchant repairs
+            // (`0x4fadb0`, `UNIT_NPC_FLAGS` bit 14).
+            if model.merchant.as_ref().is_some_and(|m| m.can_repair) {
+                model.repair_all = true;
+            }
             Ok(())
         })?,
     )?;
@@ -743,6 +747,19 @@ mod tests {
             s.eval::<bool>("return GetRepairAllCost() == 0").unwrap(),
             "a vendor that does not repair"
         );
+    }
+
+    /// `RepairAllItems` returns before anything else unless the open merchant repairs
+    /// (`0x4fadb0`, tested at `0x4fbfe9`–`0x4fbff0`): no vendor, or one without the repair flag,
+    /// queues nothing.
+    #[test]
+    fn repair_all_queues_nothing_away_from_a_repairer() {
+        let mut s = UiScript::new().unwrap();
+        s.run("RepairAllItems()").unwrap();
+        assert!(!s.take_repair_all(), "no vendor");
+        s.set_merchant(Some(stock()));
+        s.run("RepairAllItems()").unwrap();
+        assert!(!s.take_repair_all(), "a vendor that does not repair");
     }
 
     #[test]

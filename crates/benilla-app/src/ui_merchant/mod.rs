@@ -1082,6 +1082,84 @@ mod tests {
         assert_eq!(got, i64::from(want), "the undiscounted total is {full}");
     }
 
+    /// `RepairAllItems()` through the feed and the drain, at [`purse_fixture`]'s vendor carrying
+    /// `npc_flags`, with the sword at `slot_field` and `money` copper: the packets, the
+    /// `UI_ERROR_MESSAGE` lines and the message rows queued for their sound.
+    fn repair_all(
+        npc_flags: u32,
+        slot_field: u16,
+        money: u32,
+    ) -> (Vec<ClientCommand>, Vec<String>, Vec<&'static str>) {
+        use benilla_protocol::field::FIELD_UNIT_NPC_FLAGS;
+        use benilla_protocol::ObjectFields;
+        use bevy::ecs::system::RunSystemOnce;
+        use purse_fixture::*;
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<Items>()
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<MerchantOpen>()
+            .init_resource::<MerchantErrors>()
+            .init_resource::<NameCache>()
+            .init_resource::<crate::net::Reputations>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .insert_resource(NetCommands(tx));
+        seat(app.world_mut());
+        let mut units = app.world_mut().query::<(&Guid, &mut ObjectStore)>();
+        for (guid, mut store) in units.iter_mut(app.world_mut()) {
+            if guid.0 == VENDOR {
+                let flags = ObjectFields::from_pairs(&[(FIELD_UNIT_NPC_FLAGS, npc_flags)]);
+                store.0.merge(flags);
+            }
+        }
+        app.world_mut()
+            .spawn((SelfPlayer, Guid(0x5e1f), player(slot_field, money)));
+        let script = UiScript::new().unwrap();
+        record_errors(&script);
+        app.insert_non_send_resource(script);
+        app.world_mut().run_system_once(feed_merchant).unwrap();
+        while rx.try_recv().is_ok() {} // the feed's name query for the vendor
+        app.world()
+            .non_send_resource::<UiScript>()
+            .run("RepairAllItems()")
+            .unwrap();
+        app.world_mut().run_system_once(drain_merchant).unwrap();
+        let sent = rx.try_iter().collect();
+        let lines = shown(app.world().non_send_resource::<UiScript>());
+        (sent, lines, sounded(app.world()))
+    }
+
+    /// At a vendor that does not repair, `RepairAllItems` sends nothing and says nothing: it
+    /// returns (`0x4fbff0`) unless `0x4fadb0` finds the repair flag on the open merchant, before
+    /// its purse test. The same worn sword at a repairer goes out.
+    #[test]
+    fn repair_all_does_nothing_at_a_vendor_that_does_not_repair() {
+        use crate::target::cursor_mode::npc_flags::VENDOR as NPC_FLAG_VENDOR;
+        use benilla_protocol::field::FIELD_PLAYER_INV_SLOT_HEAD;
+        use purse_fixture::*;
+
+        let (_, discounted) = sword_prices();
+        let main_hand = FIELD_PLAYER_INV_SLOT_HEAD + 2 * 15;
+        for money in [discounted, discounted - 1] {
+            let (sent, lines, rows) = repair_all(NPC_FLAG_VENDOR, main_hand, money);
+            assert!(sent.is_empty(), "{money} copper: no repair goes out");
+            assert!(
+                lines.is_empty() && rows.is_empty(),
+                "{money} copper: no purse refusal"
+            );
+        }
+        let (sent, ..) = repair_all(NPC_FLAG_VENDOR | NPC_FLAG_REPAIR, main_hand, discounted);
+        assert!(matches!(
+            sent.as_slice(),
+            [ClientCommand::RepairItem {
+                vendor: VENDOR,
+                item_guid: 0
+            }]
+        ));
+    }
+
     /// `RepairAllItems` prices only the equipped slots for its purse test (`0x4fc026`–`0x4fc063`,
     /// `0x4fc08e`): the sword worn and over the purse is refused with `ERR_NOT_ENOUGH_MONEY` and
     /// no send; the same sword in the backpack, which `GetRepairAllCost` would count, leaves a worn
@@ -1089,35 +1167,13 @@ mod tests {
     #[test]
     fn repair_all_tests_the_purse_against_the_worn_gear_alone() {
         use benilla_protocol::field::FIELD_PLAYER_INV_SLOT_HEAD;
-        use bevy::ecs::system::RunSystemOnce;
         use purse_fixture::*;
 
         let (_, discounted) = sword_prices();
-        let repair_all = |slot_field: u16| {
-            let (tx, rx) = crossbeam_channel::unbounded();
-            let mut app = App::new();
-            app.init_resource::<Items>()
-                .init_resource::<crate::net::GuidIndex>()
-                .init_resource::<MerchantOpen>()
-                .init_resource::<crate::net::Reputations>()
-                .init_resource::<crate::ui_chat::ChatLog>()
-                .init_resource::<crate::sound::MessageSounds>()
-                .insert_resource(NetCommands(tx));
-            seat(app.world_mut());
-            app.world_mut()
-                .spawn((SelfPlayer, Guid(0x5e1f), player(slot_field, discounted - 1)));
-            let script = UiScript::new().unwrap();
-            record_errors(&script);
-            script.run("RepairAllItems()").unwrap();
-            app.insert_non_send_resource(script);
-            app.world_mut().run_system_once(drain_merchant).unwrap();
-            let sent: Vec<ClientCommand> = rx.try_iter().collect();
-            let lines = shown(app.world().non_send_resource::<UiScript>());
-            (sent, lines, sounded(app.world()))
-        };
 
         // The main hand (slot 15).
-        let (sent, lines, rows) = repair_all(FIELD_PLAYER_INV_SLOT_HEAD + 2 * 15);
+        let main_hand = FIELD_PLAYER_INV_SLOT_HEAD + 2 * 15;
+        let (sent, lines, rows) = repair_all(NPC_FLAG_REPAIR, main_hand, discounted - 1);
         assert!(sent.is_empty(), "worn, one copper short: nothing goes out");
         assert_eq!(lines, [NOT_ENOUGH_MONEY]);
         assert_eq!(
@@ -1127,7 +1183,8 @@ mod tests {
         );
 
         // Backpack slot 1, inventory slot 23.
-        let (sent, lines, rows) = repair_all(FIELD_PLAYER_INV_SLOT_HEAD + 2 * 23);
+        let backpack_1 = FIELD_PLAYER_INV_SLOT_HEAD + 2 * 23;
+        let (sent, lines, rows) = repair_all(NPC_FLAG_REPAIR, backpack_1, discounted - 1);
         assert!(
             matches!(
                 sent.as_slice(),
