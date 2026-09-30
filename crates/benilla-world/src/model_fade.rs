@@ -72,7 +72,7 @@ pub fn fade_band(radius: f32) -> Option<(f32, f32)> {
 /// behind ([`DespawnFade`]). The interior classifier keeps the light law through either.
 #[derive(Component, Clone)]
 pub struct RenderFade {
-    /// `Time::elapsed_secs` at arming.
+    /// `Time::elapsed_secs` the ramp runs from: its arming, or an appear ramp's arrival.
     pub started: f32,
     /// Seconds; both reference ramps are 2000 ms (`FadeTo`'s `0x7d0`, the pump's `age > 0x7d0`).
     pub duration: f32,
@@ -278,7 +278,10 @@ mod unit_render_alpha_tests {
     fn a_pending_unit_is_zero_and_a_settled_one_is_opaque() {
         assert_eq!(
             unit_at(10.0, |u| {
-                u.insert(UnitAppearFade::Pending { since: 9.0 });
+                u.insert(UnitAppearFade::Pending {
+                    since: 9.0,
+                    arrived: 9.0,
+                });
             }),
             0.0,
             "pending: not shown yet, so nothing that rides this number may show either"
@@ -494,12 +497,16 @@ pub fn apply_render_fade(
     }
 }
 
-/// An appear fade waiting to arm, the entity hidden meanwhile. The reference arms it on the object
-/// becoming visible (`0x4651a0`), not at stream-in, so it never plays behind a loading screen.
+/// An appear fade waiting to arm, the entity hidden meanwhile. The reference arms it as the
+/// object's create block is processed (`0x4651a0` → `0x465c50` → the type's appear handler →
+/// `0x613af0`), so the ramp runs from the arrival; here it is held while a loading cover is up,
+/// so it never plays behind one.
 #[derive(Component, Clone)]
 pub struct PendingAppearFade {
-    /// `Time::elapsed_secs` at attach, the backstop timeout's origin.
+    /// `Time::elapsed_secs` when the part began waiting, the backstop timeout's origin.
     pub since: f32,
+    /// `Time::elapsed_secs` at the object's arrival, the ramp's origin once the world is shown.
+    pub arrived: f32,
 }
 
 /// Arm a pending fade after this long anyway, so a stuck load cannot leave an entity invisible.
@@ -510,8 +517,9 @@ const PENDING_TIMEOUT_SECS: f32 = 8.0;
 /// the ramp ends, after which a new part spawns steady.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub enum UnitAppearFade {
-    /// Waiting for the world to be shown.
-    Pending { since: f32 },
+    /// Waiting for the world to be shown: since `since`, the backstop's origin, with the ramp
+    /// running from `arrived`.
+    Pending { since: f32, arrived: f32 },
     /// A joiner copies `started`, which reproduces the same curve.
     Live { started: f32 },
 }
@@ -522,7 +530,7 @@ pub enum JoinedFade {
     /// No unit fade in flight: spawn steady.
     Steady,
     /// Arm with the unit once the world is shown.
-    Pending { since: f32 },
+    Pending { since: f32, arrived: f32 },
     /// Join the running ramp at its current position.
     Live { started: f32 },
 }
@@ -531,7 +539,7 @@ pub enum JoinedFade {
 pub fn join_unit_appear_fade(unit: Option<UnitAppearFade>) -> JoinedFade {
     match unit {
         None => JoinedFade::Steady,
-        Some(UnitAppearFade::Pending { since }) => JoinedFade::Pending { since },
+        Some(UnitAppearFade::Pending { since, arrived }) => JoinedFade::Pending { since, arrived },
         Some(UnitAppearFade::Live { started }) => JoinedFade::Live { started },
     }
 }
@@ -548,9 +556,22 @@ pub(crate) fn arm_appear_fade(
         Has<crate::billboard::BillboardCard>,
     )>,
     mut units: Query<&mut UnitAppearFade>,
+    // When the cover last lifted; `None` while it is up.
+    mut shown_at: Local<Option<f32>>,
 ) {
     let now = time.elapsed_secs();
     let shown = !viewer.world_covered;
+    if shown {
+        shown_at.get_or_insert(now);
+    } else {
+        *shown_at = None;
+    }
+    // The ramp runs from the unit's arrival, whatever its model and composite waited on: the
+    // create block's appear handler stamps it (`0x465c50` → `0x613af0` → `0x614f80`, `obj+0xec`)
+    // and the per-frame ramp is `t³` of the wall time since (`0x614a90`, called at `0x60800c`
+    // whether or not the body draws). Never from behind a cover: an arrival under the loading
+    // screen starts when it lifts, and a backstop arm, which counts from the attach, starts now.
+    let origin = |arrived: f32| shown_at.map_or(now, |lifted| arrived.max(lifted));
     let mut armed = 0usize;
     // Counted apart: a world-root billboard card arms only through its own spawn.
     let mut armed_cards = 0usize;
@@ -562,14 +583,16 @@ pub(crate) fn arm_appear_fade(
             // can land between this query and its commands.
             commands
                 .entity(entity)
-                .try_insert(RenderFade::appear(now))
+                .try_insert(RenderFade::appear(origin(pending.arrived)))
                 .try_remove::<PendingAppearFade>();
         }
     }
     for mut unit_fade in &mut units {
-        if let UnitAppearFade::Pending { since } = *unit_fade {
+        if let UnitAppearFade::Pending { since, arrived } = *unit_fade {
             if shown || now - since > PENDING_TIMEOUT_SECS {
-                *unit_fade = UnitAppearFade::Live { started: now };
+                *unit_fade = UnitAppearFade::Live {
+                    started: origin(arrived),
+                };
             }
         }
     }
@@ -647,7 +670,10 @@ pub struct FadeSet<'a> {
 pub enum PartFade {
     /// No ramp to join, or the batch cannot feather: open opaque.
     Steady,
-    Pending(f32),
+    Pending {
+        since: f32,
+        arrived: f32,
+    },
     Live(f32),
 }
 
@@ -656,7 +682,7 @@ impl PartFade {
     pub fn resolve(joined: JoinedFade, set: &FadeSet<'_>) -> Self {
         match (joined, set.blend) {
             (_, None) | (JoinedFade::Steady, _) => Self::Steady,
-            (JoinedFade::Pending { since }, _) => Self::Pending(since),
+            (JoinedFade::Pending { since, arrived }, _) => Self::Pending { since, arrived },
             (JoinedFade::Live { started }, _) => Self::Live(started),
         }
     }
@@ -666,7 +692,7 @@ impl PartFade {
     pub fn seed(self, set: &FadeSet<'_>, now: f32) -> (Handle<WowModelMaterial>, f32) {
         match self {
             Self::Steady => (set.steady.clone(), 1.0),
-            Self::Pending(_) => (set.blend.cloned().unwrap_or_default(), 0.0),
+            Self::Pending { .. } => (set.blend.cloned().unwrap_or_default(), 0.0),
             Self::Live(started) => (
                 set.blend.cloned().unwrap_or_default(),
                 fade_alpha(0.0, 1.0, (now - started) / APPEAR_FADE_SECS),
@@ -687,8 +713,8 @@ impl PartFade {
         }
         match self {
             Self::Steady => false,
-            Self::Pending(since) => {
-                child.insert(PendingAppearFade { since });
+            Self::Pending { since, arrived } => {
+                child.insert(PendingAppearFade { since, arrived });
                 true
             }
             Self::Live(started) => {
@@ -939,6 +965,73 @@ mod tests {
         assert_eq!(state.get(&world).get(a), 1.0);
     }
 
+    /// The ramp runs from the unit's arrival once the world is shown, so a body that waited on its
+    /// model or composite shows it already advanced, and never from behind the loading cover: an
+    /// arrival under it starts when the cover lifts, even one that arrived long before, as the
+    /// backstop counts from when the fade began waiting.
+    #[test]
+    fn an_appear_ramp_runs_from_arrival_never_from_behind_the_cover() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<crate::view::Viewer>()
+            .add_systems(Update, arm_appear_fade);
+        let frame = |app: &mut App, secs: f32, covered: bool| {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_to(std::time::Duration::from_secs_f32(secs));
+            app.world_mut()
+                .resource_mut::<crate::view::Viewer>()
+                .world_covered = covered;
+            app.update();
+        };
+        let unit = |app: &App, e: Entity| *app.world().get::<UnitAppearFade>(e).unwrap();
+        let pending = |since, arrived| UnitAppearFade::Pending { since, arrived };
+
+        // Arrived at 1 s under the loading cover and built at 1.5 s; the cover lifts at 5 s.
+        let early = app.world_mut().spawn(pending(1.5, 1.0)).id();
+        frame(&mut app, 2.0, true);
+        assert_eq!(unit(&app, early), pending(1.5, 1.0));
+        frame(&mut app, 5.0, false);
+        assert_eq!(unit(&app, early), UnitAppearFade::Live { started: 5.0 });
+
+        // A second cover from 6 s to 16 s: a unit that arrived at 6 s, 10 s before it lifts, and
+        // was built at 15 s.
+        frame(&mut app, 6.0, true);
+        let long_before = app.world_mut().spawn(pending(15.0, 6.0)).id();
+        frame(&mut app, 15.5, true);
+        assert_eq!(
+            unit(&app, long_before),
+            pending(15.0, 6.0),
+            "the backstop counts from the attach, so it still waits under the cover"
+        );
+        frame(&mut app, 16.0, false);
+        assert_eq!(
+            unit(&app, long_before),
+            UnitAppearFade::Live { started: 16.0 },
+            "it fades in after the cover lifts"
+        );
+
+        // Arrived at 17 s in view and built at 17.5 s: its ramp is half a second in.
+        let late = app.world_mut().spawn(pending(17.5, 17.0)).id();
+        let part = app
+            .world_mut()
+            .spawn(PendingAppearFade {
+                since: 17.5,
+                arrived: 17.0,
+            })
+            .id();
+        frame(&mut app, 17.5, false);
+        assert_eq!(unit(&app, late), UnitAppearFade::Live { started: 17.0 });
+        let fade = app.world().get::<RenderFade>(part).expect("the part armed");
+        assert_eq!(fade.started, 17.0, "the part rides the same ramp");
+
+        // A cover that never lifts: the backstop arms 8 s after the attach, starting then.
+        let stuck = app.world_mut().spawn(pending(20.0, 19.0)).id();
+        frame(&mut app, 21.0, true);
+        frame(&mut app, 28.5, true);
+        assert_eq!(unit(&app, stuck), UnitAppearFade::Live { started: 28.5 });
+    }
+
     /// `SystemState::apply` after a manual despawn recreates a wire destroy landing between the
     /// system's query and its commands.
     #[test]
@@ -950,7 +1043,12 @@ mod tests {
         world.init_resource::<Time>();
         // The default viewer covers nothing, so every pending fade arms this frame.
         world.init_resource::<crate::view::Viewer>();
-        let doomed = world.spawn(PendingAppearFade { since: 0.0 }).id();
+        let doomed = world
+            .spawn(PendingAppearFade {
+                since: 0.0,
+                arrived: 0.0,
+            })
+            .id();
 
         let mut state: SystemState<(
             Res<Time>,
@@ -962,9 +1060,10 @@ mod tests {
                 Has<crate::billboard::BillboardCard>,
             )>,
             Query<&mut UnitAppearFade>,
+            Local<Option<f32>>,
         )> = SystemState::new(&mut world);
-        let (time, viewer, commands, q, units) = state.get_mut(&mut world);
-        arm_appear_fade(time, viewer, commands, q, units);
+        let (time, viewer, commands, q, units, shown_at) = state.get_mut(&mut world);
+        arm_appear_fade(time, viewer, commands, q, units, shown_at);
 
         world.despawn(doomed);
         state.apply(&mut world); // would panic without the `try_*` contract
@@ -1127,10 +1226,10 @@ mod tests {
 
     #[test]
     fn pending_unit_joins_at_the_same_since() {
-        let since = 3.25;
+        let (since, arrived) = (3.25, 2.5);
         assert_eq!(
-            join_unit_appear_fade(Some(UnitAppearFade::Pending { since })),
-            JoinedFade::Pending { since }
+            join_unit_appear_fade(Some(UnitAppearFade::Pending { since, arrived })),
+            JoinedFade::Pending { since, arrived }
         );
     }
 
@@ -1166,7 +1265,10 @@ mod tests {
         assert_eq!(
             model_render_alpha(
                 10.0,
-                Some(UnitAppearFade::Pending { since: 9.0 }),
+                Some(UnitAppearFade::Pending {
+                    since: 9.0,
+                    arrived: 9.0,
+                }),
                 None,
                 1.0,
                 1.0
