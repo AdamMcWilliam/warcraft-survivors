@@ -249,6 +249,9 @@ pub struct WidgetArena {
     tooltip_kinds: Vec<FrameHandle>,
     /// The live Minimaps, kept the same way, for the containment, zoom and arrow-facing feeds.
     minimap_kinds: Vec<FrameHandle>,
+    /// The live EditBoxes, kept the same way, for the resize re-seat (`reseat_resized`) and the
+    /// per-tick relayout of multi-line boxes.
+    editbox_kinds: Vec<FrameHandle>,
 }
 
 impl Default for WidgetArena {
@@ -291,6 +294,7 @@ impl WidgetArena {
             ticked_kinds: Vec::new(),
             tooltip_kinds: Vec::new(),
             minimap_kinds: Vec::new(),
+            editbox_kinds: Vec::new(),
         }
     }
 
@@ -310,6 +314,10 @@ impl WidgetArena {
 
     pub fn minimap_kinds(&self) -> &[FrameHandle] {
         &self.minimap_kinds
+    }
+
+    pub fn editbox_kinds(&self) -> &[FrameHandle] {
+        &self.editbox_kinds
     }
 
     // ── Read access ────────────────────────────────────────────────────────────────────────────
@@ -499,6 +507,7 @@ impl WidgetArena {
             self.names.entry(n).or_insert(handle);
         }
         if matches!(kind, FrameKind::EditBox) {
+            self.editbox_kinds.push(handle);
             self.build_editbox_engine_regions(handle);
         }
         if matches!(kind, FrameKind::Minimap) {
@@ -556,6 +565,7 @@ impl WidgetArena {
         self.ticked_kinds.retain(|&t| t != h);
         self.tooltip_kinds.retain(|&t| t != h);
         self.minimap_kinds.retain(|&t| t != h);
+        self.editbox_kinds.retain(|&t| t != h);
 
         for c in children {
             self.destroy(c);
