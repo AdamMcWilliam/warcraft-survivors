@@ -622,6 +622,31 @@ fn real_spell_catalog_reads_tooltip_columns() {
     );
 }
 
+/// The WDBC schema must decode the new float arrays before `f32_at` can pass them to token
+/// expansion. An integer schema silently turns Chain Heal's 0.5 into the loader's 0.0 fallback.
+#[test]
+fn spell_schema_decodes_token_float_columns() {
+    let mut raw = Vec::new();
+    raw.extend_from_slice(b"WDBC");
+    for n in [1u32, SPELL_FIELDS as u32, (SPELL_FIELDS * 4) as u32, 1] {
+        raw.extend_from_slice(&n.to_le_bytes());
+    }
+    let mut row = vec![0u8; SPELL_FIELDS * 4];
+    row[COL_DAMAGE_MULTIPLIER_1 * 4..COL_DAMAGE_MULTIPLIER_1 * 4 + 4]
+        .copy_from_slice(&0.5f32.to_le_bytes());
+    row[COL_EFFECT_POINTS_PER_COMBO_POINT_1 * 4..COL_EFFECT_POINTS_PER_COMBO_POINT_1 * 4 + 4]
+        .copy_from_slice(&20.0f32.to_le_bytes());
+    raw.extend_from_slice(&row);
+    raw.push(0);
+    let set = parse(&raw, spell_schema(), "Spell.dbc").expect("synthetic Spell.dbc");
+    let spell = set.records().first().unwrap();
+    assert_eq!(f32_at(spell, COL_DAMAGE_MULTIPLIER_1), Some(0.5));
+    assert_eq!(
+        f32_at(spell, COL_EFFECT_POINTS_PER_COMBO_POINT_1),
+        Some(20.0)
+    );
+}
+
 /// The attack-start masks, rows from vmangos: [`SpellDisplay::on_next_swing`] (`0x404`),
 /// [`SpellDisplay::initiates_auto_attack`] (adding `AttributesEx & 0x200`) and
 /// [`SpellDisplay::initiates_auto_attack_at_go`] (`AttributesEx2 & 0x100000`), whose union is

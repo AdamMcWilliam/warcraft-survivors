@@ -162,6 +162,12 @@ pub struct SpellDisplay {
     pub proc_chance: u32,
     /// `ProcCharges` (column 26): the description expander's `$n` value before op 4.
     pub proc_charges: u32,
+    /// `StackAmount` (column 39): the description expander's `$u` (`507ef1`).
+    pub stack_amount: u32,
+    /// `MaxTargetLevel` (column 159): the description expander's `$v` (`507f4f`).
+    pub max_target_level: u32,
+    /// `MaxAffectedTargets` (column 163): the description expander's `$i` (`507fc3`).
+    pub max_affected_targets: u32,
     /// `EffectBasePoints[3]` (columns 76-78, signed): each roll's floor; -1 on weapon damage.
     pub effect_base_points: [i32; 3],
     /// `EffectDieSides[3]` (columns 64-66, signed): with n dice, the value runs base + n to
@@ -182,6 +188,10 @@ pub struct SpellDisplay {
     pub effect_chain_targets: [u32; 3],
     /// `EffectMultipleValue[3]` (columns 97-99, float): the chain or multi-target falloff.
     pub effect_multiple_value: [f32; 3],
+    /// `DmgMultiplier[3]` (columns 167-169, float): `$f`/`$F` print it scaled (`507ff7`, `508025`).
+    pub damage_multiplier: [f32; 3],
+    /// `EffectPointsPerComboPoint[3]` (columns 112-114, float): `$b` prints it chopped (`507ed4`).
+    pub effect_points_per_combo_point: [f32; 3],
     /// `EffectTriggerSpell[3]` (columns 109-111): each effect's triggered spell, 0 for none.
     pub effect_trigger_spell: [u32; 3],
     /// `EffectItemType[3]` (columns 103-105): the item a `SPELL_EFFECT_CREATE_ITEM` effect makes.
@@ -264,6 +274,9 @@ impl Default for SpellDisplay {
             proc_flags: 0,
             proc_chance: 0,
             proc_charges: 0,
+            stack_amount: 0,
+            max_target_level: 0,
+            max_affected_targets: 0,
             effect_base_points: [0; 3],
             effect_die_sides: [0; 3],
             effect_base_dice: [0; 3],
@@ -277,6 +290,8 @@ impl Default for SpellDisplay {
             effect_radius_index: [0; 3],
             effect_chain_targets: [0; 3],
             effect_multiple_value: [0.0; 3],
+            damage_multiplier: [0.0; 3],
+            effect_points_per_combo_point: [0.0; 3],
             effect_trigger_spell: [0; 3],
             effect_item_type: [0; 3],
             effect_misc_value: [0; 3],

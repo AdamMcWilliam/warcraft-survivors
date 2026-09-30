@@ -168,6 +168,11 @@ const COL_CASTING_TIME_INDEX: usize = 18;
 const COL_PROC_FLAGS: usize = 24;
 const COL_PROC_CHANCE: usize = 25;
 const COL_PROC_CHARGES: usize = 26;
+const COL_STACK_AMOUNT: usize = 39;
+const COL_MAX_TARGET_LEVEL: usize = 159;
+const COL_MAX_AFFECTED_TARGETS: usize = 163;
+const COL_DAMAGE_MULTIPLIER_1: usize = 167;
+const COL_EFFECT_POINTS_PER_COMBO_POINT_1: usize = 112;
 
 /// The per-effect `[3]` arrays, each constant slot 0; die sides and base points are signed.
 const COL_EFFECT_DIE_SIDES_1: usize = 64;
@@ -362,8 +367,8 @@ impl SpellCatalog {
     }
 }
 
-/// 173 fields, `u32` but for the floats (`Speed`, the two float effect arrays) and the four enUS
-/// string heads; the signed columns stay `u32`, as [`i32_at`] reads the same bits.
+/// 173 fields, `u32` but for `Speed`, the four float effect arrays and the four enUS string heads;
+/// the signed columns stay `u32`, as [`i32_at`] reads the same bits.
 fn spell_schema() -> Schema {
     let mut s = Schema::new("Spell");
     for i in 0..SPELL_FIELDS {
@@ -390,6 +395,21 @@ fn spell_schema() -> Schema {
         } else if (COL_EFFECT_MULTIPLE_VALUE_1..COL_EFFECT_MULTIPLE_VALUE_1 + 3).contains(&i) {
             s.add_field(SchemaField::new(
                 format!("EffectMultipleValue{}", i - COL_EFFECT_MULTIPLE_VALUE_1),
+                FieldType::Float32,
+            ));
+        } else if (COL_EFFECT_POINTS_PER_COMBO_POINT_1..COL_EFFECT_POINTS_PER_COMBO_POINT_1 + 3)
+            .contains(&i)
+        {
+            s.add_field(SchemaField::new(
+                format!(
+                    "EffectPointsPerComboPoint{}",
+                    i - COL_EFFECT_POINTS_PER_COMBO_POINT_1
+                ),
+                FieldType::Float32,
+            ));
+        } else if (COL_DAMAGE_MULTIPLIER_1..COL_DAMAGE_MULTIPLIER_1 + 3).contains(&i) {
+            s.add_field(SchemaField::new(
+                format!("DmgMultiplier{}", i - COL_DAMAGE_MULTIPLIER_1),
                 FieldType::Float32,
             ));
         } else {
@@ -585,6 +605,9 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 proc_flags: u32_at(r, COL_PROC_FLAGS).unwrap_or(0),
                 proc_chance: u32_at(r, COL_PROC_CHANCE).unwrap_or(0),
                 proc_charges: u32_at(r, COL_PROC_CHARGES).unwrap_or(0),
+                stack_amount: u32_at(r, COL_STACK_AMOUNT).unwrap_or(0),
+                max_target_level: u32_at(r, COL_MAX_TARGET_LEVEL).unwrap_or(0),
+                max_affected_targets: u32_at(r, COL_MAX_AFFECTED_TARGETS).unwrap_or(0),
                 effect_base_points: std::array::from_fn(|i| {
                     i32_at(r, COL_EFFECT_BASE_POINTS_1 + i).unwrap_or(0)
                 }),
@@ -612,6 +635,12 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 }),
                 effect_multiple_value: std::array::from_fn(|i| {
                     f32_at(r, COL_EFFECT_MULTIPLE_VALUE_1 + i).unwrap_or(0.0)
+                }),
+                damage_multiplier: std::array::from_fn(|i| {
+                    f32_at(r, COL_DAMAGE_MULTIPLIER_1 + i).unwrap_or(0.0)
+                }),
+                effect_points_per_combo_point: std::array::from_fn(|i| {
+                    f32_at(r, COL_EFFECT_POINTS_PER_COMBO_POINT_1 + i).unwrap_or(0.0)
                 }),
                 effect_trigger_spell,
                 effect_item_type: std::array::from_fn(|i| {
