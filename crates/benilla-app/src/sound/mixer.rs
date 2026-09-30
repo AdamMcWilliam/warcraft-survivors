@@ -310,7 +310,7 @@ impl Mixer {
         Ok((track, handle))
     }
 
-    /// Decode-stream a long sound (music, ambience MP3s) on the main track.
+    /// Decode-stream a long sound (music, an ambience bed) on the main track.
     pub(crate) fn play_stream(
         &mut self,
         data: StreamingSoundData<FromFileError>,
@@ -486,22 +486,49 @@ pub(crate) fn sfx_from_bytes(bytes: Vec<u8>) -> Result<StaticSoundData> {
     StaticSoundData::from_cursor(std::io::Cursor::new(bytes)).context("decoding sfx")
 }
 
-/// Decode a looping bed whole: kira's streaming decoder reads these 22050 Hz PCM WAVs at twice
-/// their length, so a streamed loop falls silent past EOF.
-pub(crate) fn loop_from_bytes(bytes: Vec<u8>) -> Result<StaticSoundData> {
-    Ok(sfx_from_bytes(bytes)?.loop_region(..))
-}
-
-/// Wrap compressed audio bytes for decode-streaming, behind [`PromotingSource`].
+/// Wrap compressed audio bytes for decode-streaming ([`stream_from_source`]).
 pub(crate) fn stream_from_bytes(bytes: Vec<u8>) -> Result<StreamingSoundData<FromFileError>> {
-    StreamingSoundData::from_media_source(PromotingSource(std::io::Cursor::new(bytes)))
-        .context("opening stream")
+    let len = bytes.len() as u64;
+    stream_from_source(std::io::Cursor::new(bytes), len)
 }
 
-/// Compressed-audio source whose first read on a thread promotes it to user-interactive QoS:
-/// kira's decode thread starts at default QoS, below the world-entry burst, and a starved decoder
-/// crackles without tripping any [`MixHealth`] meter.
-struct PromotingSource(std::io::Cursor<Vec<u8>>);
+/// Open a decode-stream over `len` bytes of `source`: its header is read here, on the calling
+/// thread, and the rest on kira's decode thread as it plays, behind [`PromotingSource`].
+pub(crate) fn stream_from_source<R>(
+    source: R,
+    len: u64,
+) -> Result<StreamingSoundData<FromFileError>>
+where
+    R: std::io::Read + std::io::Seek + Send + Sync + 'static,
+{
+    let armed = Arc::new(AtomicBool::new(false));
+    let data = StreamingSoundData::from_media_source(PromotingSource {
+        inner: source,
+        len,
+        armed: armed.clone(),
+    })
+    .context("opening stream")?;
+    armed.store(true, Ordering::Relaxed);
+    Ok(data)
+}
+
+/// A stream's bytes, whose first read on a thread once the stream is built promotes that thread
+/// to user-interactive QoS: kira's decode thread starts at default QoS, below the world-entry
+/// burst, and a starved decoder crackles without tripping any [`MixHealth`] meter.
+struct PromotingSource<R> {
+    inner: R,
+    len: u64,
+    /// Set once the stream is built, so the thread that read its header keeps its own QoS.
+    armed: Arc<AtomicBool>,
+}
+
+impl<R> PromotingSource<R> {
+    fn promote(&self) {
+        if self.armed.load(Ordering::Relaxed) {
+            promote_decode_thread();
+        }
+    }
+}
 
 /// Once-per-thread promotion latch for [`PromotingSource`].
 fn promote_decode_thread() {
@@ -522,26 +549,29 @@ fn promote_decode_thread() {
     });
 }
 
-impl std::io::Read for PromotingSource {
+impl<R: std::io::Read> std::io::Read for PromotingSource<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        promote_decode_thread();
-        self.0.read(buf)
+        self.promote();
+        self.inner.read(buf)
     }
 }
 
-impl std::io::Seek for PromotingSource {
+impl<R: std::io::Seek> std::io::Seek for PromotingSource<R> {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        promote_decode_thread();
-        self.0.seek(pos)
+        self.promote();
+        self.inner.seek(pos)
     }
 }
 
-impl symphonia::core::io::MediaSource for PromotingSource {
+impl<R> symphonia::core::io::MediaSource for PromotingSource<R>
+where
+    R: std::io::Read + std::io::Seek + Send + Sync,
+{
     fn is_seekable(&self) -> bool {
         true
     }
     fn byte_len(&self) -> Option<u64> {
-        Some(self.0.get_ref().len() as u64)
+        Some(self.len)
     }
 }
 
@@ -707,8 +737,8 @@ impl StreamWatch {
                 last_pos,
                 window_start,
             } => {
-                // A backwards jump is a new stream swapped onto the slot (no watched stream
-                // loops), so it re-enters its own spin-up.
+                // A backwards jump is a new stream swapped onto the slot or an ambience bed's
+                // loop wrapping; either re-enters the spin-up, uncounted.
                 if pos < last_pos {
                     self.phase = Phase::Starting {
                         since: now,
@@ -744,7 +774,7 @@ impl StreamWatch {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     fn preset(decay: f32, hf_ratio: f32, room: i32, room_hf: i32, reverb: i32) -> SoundProvider {
@@ -1472,5 +1502,252 @@ mod tests {
             midband >= 3,
             "the fade is gradual, not an instant cut — needs blocks mid-ramp ({series:?})"
         );
+    }
+
+    /// A 16-bit PCM WAV in memory with `block_align` as given: 2 on a stereo file is the header
+    /// of the install's ambience beds.
+    pub(in crate::sound) fn pcm16_wav(
+        rate: u32,
+        channels: u16,
+        block_align: u16,
+        frames: usize,
+        sample: impl Fn(usize) -> i16,
+    ) -> Vec<u8> {
+        let data_len = (frames * channels as usize * 2) as u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * u32::from(channels) * 2).to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        for i in 0..frames {
+            for _ in 0..channels {
+                wav.extend_from_slice(&sample(i).to_le_bytes());
+            }
+        }
+        wav
+    }
+
+    /// The install's bed header: 22050 Hz stereo, `nBlockAlign` 2.
+    #[test]
+    fn a_stereo_bed_streams_its_true_length() {
+        let frames = 3000;
+        let bed = pcm16_wav(22_050, 2, 2, frames, |i| i as i16);
+        let data = stream_from_bytes(bed).expect("opens");
+        assert_eq!(data.num_frames(), frames, "the frames in the data chunk");
+    }
+
+    /// Rendered through kira at the bed's own rate, a streamed loop wraps from its last frame to
+    /// its first and plays on, where one sized from the stored `nBlockAlign` stops at the end.
+    #[test]
+    fn a_streamed_bed_loops_seamlessly() {
+        use kira::backend::{Backend, Renderer};
+        use std::sync::Mutex;
+
+        const RATE: u32 = 22_050;
+        const FRAMES: usize = 3000;
+        const STEP: i16 = 8;
+        struct Capture(Arc<Mutex<Option<Renderer>>>);
+        impl Backend for Capture {
+            type Settings = ();
+            type Error = ();
+            fn setup(_: (), _buf: usize) -> Result<(Self, u32), ()> {
+                Ok((Capture(Arc::new(Mutex::new(None))), RATE))
+            }
+            fn start(&mut self, renderer: Renderer) -> Result<(), ()> {
+                *self.0.lock().unwrap() = Some(renderer);
+                Ok(())
+            }
+        }
+
+        // A sawtooth that names its own frame: sample `i` is `1000 + STEP·i`, never silent.
+        let bed = pcm16_wav(RATE, 2, 2, FRAMES, |i| 1000 + STEP * i as i16);
+        let data = stream_from_bytes(bed).expect("opens").loop_region(..);
+        let mut manager =
+            AudioManager::<Capture>::new(AudioManagerSettings::default()).expect("manager");
+        let slot = manager.backend_mut().0.clone();
+        let _h = manager.play(data).expect("play");
+
+        // Let the decode thread fill its ring, then render two and a half loops in one go.
+        let render = |n: usize| -> Vec<f32> {
+            let mut guard = slot.lock().unwrap();
+            let r = guard.as_mut().expect("renderer started");
+            r.on_start_processing();
+            let mut out = vec![0.0f32; n * 2];
+            r.process(&mut out, 2);
+            out.iter().step_by(2).copied().collect()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut lead = render(1);
+        while lead[0] == 0.0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            lead = render(1);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let heard = render(FRAMES * 5 / 2);
+
+        let frame_of = |v: f32| ((v * 32768.0 - 1000.0) / f32::from(STEP)).round() as i64;
+        let silent = heard.iter().filter(|v| v.abs() < 1e-4).count();
+        assert_eq!(silent, 0, "no silence once playing");
+        let frames: Vec<i64> = heard.iter().map(|&v| frame_of(v)).collect();
+        let wraps = frames.windows(2).filter(|w| w[1] < w[0]).count();
+        assert_eq!(wraps, 2, "two wraps in two and a half loops");
+        for (k, w) in frames.windows(2).enumerate() {
+            let next = (w[0] + 1) % FRAMES as i64;
+            assert_eq!(w[1], next, "frame {k}: {} follows {}", w[1], w[0]);
+        }
+    }
+
+    /// Every bed in the install streams at its data chunk's length, the 79 under `Sound\Ambience`
+    /// whose stereo header stores a mono `nBlockAlign` (2) among them, the inn's `Tavern.wav` too:
+    /// symphonia 0.5 sized its frames from that field and counted them twice.
+    #[test]
+    fn real_beds_stream_their_data_chunks_frames() {
+        use std::io::Read;
+        let data = benilla_formats::wow_data_or_skip!();
+        let Ok(chain) = benilla_formats::open_chain(&data) else {
+            eprintln!("skipping: no client data at {}", data.display());
+            return;
+        };
+        let beds: Vec<String> = chain
+            .list()
+            .expect("listing")
+            .into_iter()
+            .map(|e| e.name)
+            .filter(|n| {
+                let n = n.to_ascii_lowercase();
+                n.starts_with("sound\\ambience\\") && n.ends_with(".wav")
+            })
+            .collect();
+        assert!(beds.len() > 100, "the install's beds: {}", beds.len());
+        let mut mono_align = 0;
+        for path in &beds {
+            let archive = chain.archive_for(path).expect("in the chain");
+            let mut head = vec![0u8; 4096];
+            let n = archive.open_file(path).unwrap().read(&mut head).unwrap();
+            head.truncate(n);
+            let (frame, data_len, align) = wav_frame_and_data_len(&head).expect(path);
+            mono_align += usize::from(align < frame);
+
+            let file = archive.open_file(path).expect("opens");
+            let len = file.size();
+            let streamed = stream_from_source(file, len).expect(path).num_frames();
+            assert_eq!(streamed, data_len / frame, "{path}: streamed frames");
+        }
+        assert!(mono_align > 0, "no bed carries the mono nBlockAlign");
+
+        let forest = "Sound\\Ambience\\ZoneAmbience\\ForestNormalDay.wav";
+        let decoded = sfx_from_bytes(chain.read(forest).unwrap()).unwrap();
+        assert_eq!(decoded.num_frames(), 60 * 22_050, "decoded whole, 60 s");
+    }
+
+    /// A PCM WAV header's frame size (channels × bytes per sample), data chunk length and stored
+    /// `nBlockAlign`.
+    fn wav_frame_and_data_len(head: &[u8]) -> Option<(usize, usize, usize)> {
+        let u16_at = |at: usize| Some(u16::from_le_bytes(head.get(at..at + 2)?.try_into().ok()?));
+        let u32_at = |at: usize| Some(u32::from_le_bytes(head.get(at..at + 4)?.try_into().ok()?));
+        let (mut at, mut fmt) = (12usize, None);
+        loop {
+            let (id, len) = (head.get(at..at + 4)?, u32_at(at + 4)? as usize);
+            if id == b"fmt " {
+                let frame = usize::from(u16_at(at + 10)?) * usize::from(u16_at(at + 22)? / 8);
+                fmt = Some((frame, usize::from(u16_at(at + 20)?)));
+            } else if id == b"data" {
+                let (frame, align) = fmt?;
+                return Some((frame, len, align));
+            }
+            at += 8 + len + (len & 1);
+        }
+    }
+
+    /// Silent MPEG-1 Layer III frames, 44.1 kHz mono, one per `(bitrate index, padding)`: a
+    /// header over an all-zero body, whose side info asks for no data and decodes to silence.
+    fn silent_mp3(frames: &[(u8, bool)]) -> Vec<u8> {
+        const KBPS: [u32; 15] = [
+            0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+        ];
+        let mut mp3 = Vec::new();
+        for &(bitrate, pad) in frames {
+            let len = 144 * KBPS[usize::from(bitrate)] * 1000 / 44_100 + u32::from(pad);
+            mp3.extend_from_slice(&[0xFF, 0xFB, bitrate << 4 | u8::from(pad) << 1, 0xC0]);
+            mp3.resize(mp3.len() + len as usize - 4, 0);
+        }
+        mp3
+    }
+
+    /// Pump `h` on a mock device until it stops, for at most 5 s; whether it did.
+    pub(in crate::sound) fn plays_out(
+        manager: &mut AudioManager<kira::backend::mock::MockBackend>,
+        h: &StreamingSoundHandle<FromFileError>,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let backend = manager.backend_mut();
+        while h.state() != kira::sound::PlaybackState::Stopped
+            && std::time::Instant::now() < deadline
+        {
+            backend.on_start_processing();
+            backend.process();
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        h.state() == kira::sound::PlaybackState::Stopped
+    }
+
+    pub(in crate::sound) fn mock_manager() -> AudioManager<kira::backend::mock::MockBackend> {
+        use kira::backend::mock::{MockBackend, MockBackendSettings};
+        AudioManager::<MockBackend>::new(AudioManagerSettings {
+            backend_settings: MockBackendSettings {
+                sample_rate: 44_100,
+            },
+            ..Default::default()
+        })
+        .expect("mock backend")
+    }
+
+    /// A stream that runs out of packets before the length its container reported stops there.
+    /// With no Xing header, symphonia 0.6 estimates an MP3's length from its first 17 frames'
+    /// mean size; small frames ahead of large ones make it over-count, as it does
+    /// `ZulGurubVooDoo.mp3` by one frame. kira 0.12.4 answers the missing packets with empty
+    /// chunks, and its decode thread spins on them forever with the sound never ending.
+    #[test]
+    fn a_stream_that_runs_out_before_its_reported_length_stops() {
+        let mut frames = vec![(1, false); 17];
+        frames.extend([(9, false); 3]);
+        let data = stream_from_bytes(silent_mp3(&frames)).expect("opens");
+        assert!(
+            data.num_frames() > 20 * 1152,
+            "the estimate over-counts: {}",
+            data.num_frames()
+        );
+        let mut manager = mock_manager();
+        let h = manager.play(data).expect("play");
+        assert!(
+            plays_out(&mut manager, &h),
+            "the stream ends at its last packet"
+        );
+    }
+
+    /// The install's one track that symphonia 0.6 over-counts ends, played from its last second.
+    #[test]
+    fn the_over_counted_install_track_ends() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let Ok(chain) = benilla_formats::open_chain(&data) else {
+            eprintln!("skipping: no client data at {}", data.display());
+            return;
+        };
+        let path = "Sound\\Music\\Musical Moments\\ZulGurubVooDoo.mp3";
+        let stream = stream_from_bytes(chain.read(path).expect("in the chain")).expect("opens");
+        let secs = stream.duration().as_secs_f64();
+        let mut manager = mock_manager();
+        let h = manager
+            .play(stream.start_position(secs - 1.0))
+            .expect("play");
+        assert!(plays_out(&mut manager, &h), "{path} ends");
     }
 }
