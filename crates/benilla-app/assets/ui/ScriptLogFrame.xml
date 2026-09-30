@@ -127,7 +127,10 @@
             BenillaScriptLog_UpdateDetail()
         end
 
-        -- The selected message in full, traceback and all.
+        -- The selected message in full, traceback and all, in a box a player can select and copy
+        -- from. A text that has not changed is left alone: `SetText` collapses the selection, so a
+        -- new error arriving must not undo one about to be copied. A different text takes the
+        -- keyboard from the box, as a click on another row does.
         function BenillaScriptLog_UpdateDetail()
             local text = ""
             if BenillaScriptLogSelected then
@@ -141,12 +144,24 @@
             if text == "" then
                 text = "Select a row above to read it in full."
             end
-            getglobal("BenillaScriptLogDetailText"):SetText(text)
+            local box = getglobal("BenillaScriptLogDetailText")
+            if text ~= box.shown then
+                box.shown = text
+                box:ClearFocus()
+                box:SetText(text)
+            end
         end
 
-        -- Text rects resolve after Lua runs, so the detail child is re-measured every frame.
-        function BenillaScriptLogFrame_OnUpdate()
-            BenillaScroll_ResizeChild("BenillaScriptLogDetailScroll", { "BenillaScriptLogDetailText" })
+        -- The box is read-only: a player's edit is undone. The restore's own `SetText` raises
+        -- another change, which finds the text equal and stops; `SetText` of an equal text does
+        -- nothing. The selection an edit replaced is put back, so Ctrl+C still copies it all.
+        function BenillaScriptLogDetail_OnTextChanged()
+            local shown = this.shown or ""
+            if this:GetText() ~= shown then
+                this:SetText(shown)
+                this:HighlightText()
+            end
+            ScrollingEdit_OnTextChanged(getglobal("BenillaScriptLogDetailScroll"))
         end
 
         function BenillaScriptLogRow_OnClick(button)
@@ -304,18 +319,38 @@
                         </Anchors>
                         <Scripts><OnValueChanged>BenillaScrollBar_OnValueChanged(this, arg1)</OnValueChanged></Scripts>
                     </Slider>
-                    <Frame name="$parentChild">
+                    <!-- Mouse-enabled and the pane's full height, as SendMailScrollChildFrame is
+                         (MailFrame.xml:604-659): a click below the text focuses the box. -->
+                    <Frame name="$parentChild" enableMouse="true">
                         <Size><AbsDimension x="296" y="119"/></Size>
                         <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
-                        <Layers>
-                            <Layer level="ARTWORK">
-                                <!-- 270 wide so the traceback wraps rather than clips. -->
-                                <FontString name="BenillaScriptLogDetailText" inherits="GameFontHighlightSmall" justifyH="LEFT" justifyV="TOP" text="">
-                                    <Size><AbsDimension x="270" y="0"/></Size>
-                                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="6" y="-6"/></Offset></Anchor></Anchors>
-                                </FontString>
-                            </Layer>
-                        </Layers>
+                        <Frames>
+                            <!-- A multi-line box in a scroll frame as MailFrame.xml:616-649 hosts the mail
+                                 body: `autoFocus="false"`, so the keyboard stays with the game until a
+                                 click, and Escape clears the focus. A multi-line box is as tall as its
+                                 insets and its wrapped text, so the scroll frame ranges over it as
+                                 ScrollingEdit_OnTextChanged (UIPanelTemplates.lua:307) recomputes. The
+                                 insets seat the text 6 in and 6 down, 270 wide, and leave 20 below
+                                 the last line. No `letters`, so the whole error goes in. Read-only
+                                 through OnTextChanged; a click selects it all, so Ctrl+C copies the
+                                 error. Not wired: the stock scroll-to-caret (UIPanelTemplates.lua:
+                                 314-342), since selecting all leaves the caret at the end and a
+                                 click would scroll a long traceback to its bottom. -->
+                            <EditBox name="BenillaScriptLogDetailText" multiLine="true" autoFocus="false">
+                                <Size><AbsDimension x="296" y="119"/></Size>
+                                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                                <TextInsets><AbsInset left="6" right="20" top="6" bottom="20"/></TextInsets>
+                                <Scripts>
+                                    <OnTextChanged>BenillaScriptLogDetail_OnTextChanged()</OnTextChanged>
+                                    <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
+                                    <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
+                                </Scripts>
+                                <FontString inherits="GameFontHighlightSmall"/>
+                            </EditBox>
+                        </Frames>
+                        <Scripts>
+                            <OnMouseUp>BenillaScriptLogDetailText:SetFocus()</OnMouseUp>
+                        </Scripts>
                     </Frame>
                 </Frames>
             </ScrollFrame>
@@ -338,7 +373,6 @@
             <!-- A spin bubbles up the parent chain; the detail pane's own handler wins there. -->
             <OnMouseWheel>BenillaScriptLogFrame_OnMouseWheel(arg1)</OnMouseWheel>
             <OnShow>BenillaScriptLog_Update()</OnShow>
-            <OnUpdate>BenillaScriptLogFrame_OnUpdate()</OnUpdate>
         </Scripts>
     </Frame>
     <!-- The player's commands, as an addon registers them; after the stock ChatFrame.lua, which
