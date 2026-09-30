@@ -73,6 +73,7 @@ const FIELD_UNIT_AURASTATE: u16 = 125;
 const FIELD_UNIT_BOUNDINGRADIUS: u16 = 129;
 const FIELD_UNIT_COMBATREACH: u16 = 130;
 const FIELD_UNIT_BASE_MANA: u16 = 162;
+const FIELD_UNIT_BASE_HEALTH: u16 = 163;
 const FIELD_UNIT_DISPLAYID: u16 = 131;
 /// The unshifted appearance, untouched by forms, morphs and polymorph (`UpdateFields_1_12_1.h:77`).
 /// The client sizes the mover collision box from it (`0x60b270`), so a shapeshift keeps the box.

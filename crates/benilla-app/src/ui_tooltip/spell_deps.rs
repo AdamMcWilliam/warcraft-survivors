@@ -48,9 +48,7 @@ impl Chance {
 pub(super) enum UnitField {
     Level,
     BaseMana,
-    MaxHealth,
-    /// `UNIT_FIELD_MAXPOWER` of a type; one past the five reads nothing.
-    MaxPower(u8),
+    BaseHealth,
     RangedTime,
 }
 
@@ -59,10 +57,8 @@ impl UnitField {
         match self {
             UnitField::Level => 1,
             UnitField::BaseMana => 1 << 1,
-            UnitField::MaxHealth => 1 << 2,
-            UnitField::MaxPower(ty) if ty < 5 => 1 << (3 + ty),
-            UnitField::MaxPower(_) => 0,
-            UnitField::RangedTime => 1 << 8,
+            UnitField::BaseHealth => 1 << 2,
+            UnitField::RangedTime => 1 << 3,
         }
     }
 }
@@ -73,8 +69,7 @@ impl UnitField {
 struct UnitFields {
     level: u32,
     base_mana: u32,
-    max_health: u32,
-    max_power: [u32; 5],
+    base_health: u32,
     ranged_time: u32,
 }
 
@@ -86,8 +81,7 @@ impl UnitFields {
         Self {
             level: p.unit_level().unwrap_or(0),
             base_mana: p.unit_base_mana().unwrap_or(0),
-            max_health: p.unit_max_health().unwrap_or(0),
-            max_power: std::array::from_fn(|ty| p.unit_max_power(ty as u8).unwrap_or(0)),
+            base_health: p.unit_base_health().unwrap_or(0),
             ranged_time: p.unit_ranged_attack_time().unwrap_or(0),
         }
     }
@@ -101,18 +95,10 @@ impl UnitFields {
                 0
             }
         };
-        let mut bits = moved(UnitField::Level, self.level, prev.level)
+        moved(UnitField::Level, self.level, prev.level)
             | moved(UnitField::BaseMana, self.base_mana, prev.base_mana)
-            | moved(UnitField::MaxHealth, self.max_health, prev.max_health)
-            | moved(UnitField::RangedTime, self.ranged_time, prev.ranged_time);
-        for ty in 0..5u8 {
-            bits |= moved(
-                UnitField::MaxPower(ty),
-                self.max_power[usize::from(ty)],
-                prev.max_power[usize::from(ty)],
-            );
-        }
-        bits
+            | moved(UnitField::BaseHealth, self.base_health, prev.base_health)
+            | moved(UnitField::RangedTime, self.ranged_time, prev.ranged_time)
     }
 }
 

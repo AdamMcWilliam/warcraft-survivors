@@ -469,24 +469,24 @@ fn cost_and_cast_cells_on_real_data() {
     let mut t = TestCtx::new();
     let mut objs = no_objects();
     let objects = objs.get();
-    // A level-60 store: max health 4000, base mana 1000 (fields: health 22, max health 28,
-    // level 34, base mana 162).
+    // A level-60 store: max health 4000, base mana 1000 and base health 1689 (fields: health 22,
+    // max health 28, level 34, base mana 162, base health 163).
     let store = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
         (22u16, 3500u32),
         (28, 4000),
         (34, 60),
         (162, 1000),
+        (163, 1689),
     ]));
 
-    // Bloodrage (2687): 20% of max health, a flat number through the health fallback; bare
-    // "Instant" on a non-mana type.
+    // Bloodrage (2687): 20% of base health; bare "Instant" on a non-mana type.
     let v = spell_tooltip_view(
         2687,
         &spells,
         &mut t.ctx_for(&objects, 0, None, Some(&store)),
     )
     .expect("Bloodrage view");
-    assert_eq!(v.cost.as_deref(), Some("800 Health"), "20% of 4000");
+    assert_eq!(v.cost.as_deref(), Some("337 Health"), "20% of 1689");
     assert_eq!(v.cast_time.as_deref(), Some("Instant"));
 
     // Life Tap (1454): the 5875 data has no cost columns for any rank, so the cell is empty.

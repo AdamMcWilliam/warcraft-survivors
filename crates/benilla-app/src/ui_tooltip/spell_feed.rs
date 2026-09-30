@@ -151,10 +151,9 @@ pub(super) fn build_view(
             deps.unit(UnitField::Level);
         }
         match usable::cost_basis(d) {
-            CostBasis::None => {}
+            CostBasis::None | CostBasis::Fixed(_) => {}
             CostBasis::BaseMana => deps.unit(UnitField::BaseMana),
-            CostBasis::MaxHealth => deps.unit(UnitField::MaxHealth),
-            CostBasis::MaxPower(ty) => deps.unit(UnitField::MaxPower(ty)),
+            CostBasis::BaseHealth => deps.unit(UnitField::BaseHealth),
         }
     }
     let cost = {
@@ -485,8 +484,7 @@ pub(super) struct PetInputs {
     guid: Option<u64>,
     level: u32,
     base_mana: u32,
-    max_health: u32,
-    max_power: [u32; 5],
+    base_health: u32,
     form: u8,
     range_units: RangeSeen,
 }
@@ -507,8 +505,7 @@ impl PetInputs {
             guid,
             level: p.unit_level().unwrap_or(0),
             base_mana: p.unit_base_mana().unwrap_or(0),
-            max_health: p.unit_max_health().unwrap_or(0),
-            max_power: std::array::from_fn(|i| p.unit_max_power(i as u8).unwrap_or(0)),
+            base_health: p.unit_base_health().unwrap_or(0),
             form: p.unit_shapeshift_form(),
             range_units,
         }

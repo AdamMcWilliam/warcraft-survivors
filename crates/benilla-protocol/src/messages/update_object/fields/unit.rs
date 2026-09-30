@@ -268,6 +268,10 @@ impl ObjectFields {
     pub fn unit_base_mana(&self) -> Option<u32> {
         self.get_u32(FIELD_UNIT_BASE_MANA)
     }
+    /// `UNIT_FIELD_BASE_HEALTH` (field 163, owner only): the basis for percentage health costs.
+    pub fn unit_base_health(&self) -> Option<u32> {
+        self.get_u32(FIELD_UNIT_BASE_HEALTH)
+    }
     /// `UNIT_FIELD_FACTIONTEMPLATE` (public, `+0x74`): the `FactionTemplate.dbc` row reactions use.
     pub fn unit_faction_template(&self) -> Option<u32> {
         self.get_u32(FIELD_UNIT_FACTIONTEMPLATE)

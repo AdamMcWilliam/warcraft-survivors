@@ -447,9 +447,9 @@ pub(crate) fn spell_usable(
 
 /// The resolved power cost, `GetPowerCost 0x6e31b0`: `manaCost`, plus the signed
 /// `(level - baseLevel) * manaCostPerlevel` (only creature spells carry it), plus
-/// `ManaCostPercentage` of a per-type basis: base mana for a mana spell, as the reference's
-/// `0x612c50`; else the max pool, where `0x612c50` takes 1000 for rage, 100 for focus and energy
-/// and base health for health. Then `SPELLMOD_COST` through `0x6e6af0` (`6e32e3`), clamped at 0.
+/// `ManaCostPercentage` of the reference's per-type basis (`0x612c50`): base health for health,
+/// base mana for mana, 1000 for rage, 100 for focus and energy, and 0 otherwise. Then
+/// `SPELLMOD_COST` through `0x6e6af0` (`6e32e3`), clamped at 0.
 /// The reference's per-school unit modifiers are not applied.
 ///
 /// One cost for leg 12, the press-path gate and the tooltip, as `0x6e31b0` serves all six of its
@@ -474,8 +474,8 @@ pub(crate) fn power_cost_at(
     let base = match cost_basis(d) {
         CostBasis::None => 0,
         CostBasis::BaseMana => unit.unit_base_mana().unwrap_or(0),
-        CostBasis::MaxHealth => unit.unit_max_health().unwrap_or(0),
-        CostBasis::MaxPower(ty) => unit.unit_max_power(ty).unwrap_or(0),
+        CostBasis::BaseHealth => unit.unit_base_health().unwrap_or(0),
+        CostBasis::Fixed(value) => value,
     };
     let level_delta = i64::from(level) - i64::from(d.base_level);
     let cost = i64::from(d.mana_cost)
@@ -486,29 +486,30 @@ pub(crate) fn power_cost_at(
     u32::try_from(mods.apply(d, OP_COST, cost)).unwrap_or(0)
 }
 
-/// The unit field [`power_cost_at`] scales `d`'s percentage cost by, the reference's `0x612c50`
-/// basis: base mana for a mana spell, else the max pool of the power type, or base health for a
-/// negative one.
+/// What [`power_cost_at`] scales `d`'s percentage cost by: `0x612c50`, a jump table on the power
+/// type plus 2 (`612c53`-`612c5e`), on the caster's fields.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum CostBasis {
-    /// No percentage: the cost reads no unit field.
+    /// No percentage, or a type the table sends to 0 (`612c97`): the cost reads no unit field.
     None,
+    /// Mana: `UNIT_FIELD_BASE_MANA`, unit block `+0x270` (`612c65`-`612c6b`).
     BaseMana,
-    MaxHealth,
-    /// `UNIT_FIELD_MAXPOWER` of the type; a type past the five reads nothing.
-    MaxPower(u8),
+    /// Health (-2): `UNIT_FIELD_BASE_HEALTH`, unit block `+0x274` (`612c87`-`612c8d`).
+    BaseHealth,
+    /// A constant, not the pool: 1000 for rage (`612c7e`), 100 for focus and energy (`612c75`).
+    Fixed(u32),
 }
 
 pub(crate) fn cost_basis(d: &SpellDisplay) -> CostBasis {
-    let power_type = d.power_type as i32;
     if d.mana_cost_pct == 0 {
-        CostBasis::None
-    } else if d.power_type == 0 {
-        CostBasis::BaseMana
-    } else if power_type < 0 {
-        CostBasis::MaxHealth
-    } else {
-        CostBasis::MaxPower(power_type as u8)
+        return CostBasis::None;
+    }
+    match d.power_type as i32 {
+        -2 => CostBasis::BaseHealth,
+        0 => CostBasis::BaseMana,
+        1 => CostBasis::Fixed(1000),
+        2 | 3 => CostBasis::Fixed(100),
+        _ => CostBasis::None,
     }
 }
 
@@ -762,6 +763,64 @@ mod tests {
             &items,
             &commands,
         )
+    }
+
+    /// Bloodrage (2687) takes 20% of base health, even when gear raises max health.
+    #[test]
+    fn bloodrage_cost_uses_base_health_for_cost_and_gates() {
+        let bloodrage = SpellDisplay {
+            power_type: (-2i32) as u32,
+            mana_cost_pct: 20,
+            ..Default::default()
+        };
+        let mods = SpellModifiers::default();
+        let with_gear = player(&[(22, 400), (28, 4_000), (163, 1_689)]);
+        assert_eq!(power_cost(&bloodrage, &with_gear, &mods), 337);
+        assert!(can_afford(&bloodrage, &with_gear, &mods));
+        assert_eq!(walk(&bloodrage, &with_gear), (true, false));
+
+        let below_cost = player(&[(22, 336), (28, 4_000), (163, 1_689)]);
+        assert!(!can_afford(&bloodrage, &below_cost, &mods));
+        assert_eq!(walk(&bloodrage, &below_cost), (false, true));
+
+        let without_gear = player(&[(22, 400), (28, 1_689), (163, 1_689)]);
+        assert_eq!(power_cost(&bloodrage, &without_gear, &mods), 337);
+    }
+
+    /// `0x612c50`'s jump table (`0x612ca0`, indexed by the type plus 2): base health for -2, base
+    /// mana, fixed bases for rage, focus and energy, and 0 for -1, happiness and past the table.
+    #[test]
+    fn percentage_cost_bases_follow_power_type() {
+        let store = player(&[
+            (28, 4_000), // max health
+            (29, 2_000), // max mana
+            (30, 800),   // max rage
+            (31, 80),    // max focus
+            (32, 120),   // max energy
+            (33, 500),   // max happiness
+            (162, 1_500),
+            (163, 1_689),
+        ]);
+        let mods = SpellModifiers::default();
+        let cases = [
+            (-3, 0),
+            (-2, 337),
+            (-1, 0),
+            (0, 300),
+            (1, 200),
+            (2, 20),
+            (3, 20),
+            (4, 0),
+            (5, 0),
+        ];
+        for (power_type, cost) in cases {
+            let spell = SpellDisplay {
+                power_type: power_type as u32,
+                mana_cost_pct: 20,
+                ..Default::default()
+            };
+            assert_eq!(power_cost(&spell, &store, &mods), cost, "type {power_type}");
+        }
     }
 
     /// A -30% cost cell turns an unaffordable 100-mana spell into an affordable 70 with 80 mana.

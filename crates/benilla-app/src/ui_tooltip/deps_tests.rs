@@ -44,8 +44,7 @@ struct Inputs {
     worn: u32,
     /// The disarm flag.
     disarm: bool,
-    /// A [`UnitField`] bit each: level, base mana, max health, max power of each type, ranged
-    /// attack time.
+    /// A [`UnitField`] bit each: level, base mana, base health, ranged attack time.
     unit: u16,
     /// Bit `i`: the skill line `lines[i]` at 300.
     lines: u128,
@@ -68,7 +67,7 @@ impl Inputs {
         pace: true,
         worn: EQUIPMENT_MASK,
         disarm: true,
-        unit: 0x1ff,
+        unit: 0xf,
         lines: u128::MAX,
         bits: u64::MAX,
         poke: None,
@@ -215,7 +214,7 @@ impl Inputs {
             pace: !deps.range_units,
             worn: EQUIPMENT_MASK & !deps.worn,
             disarm: !deps.disarm,
-            unit: !deps.unit & 0x1ff,
+            unit: !deps.unit & 0xf,
             lines: layout
                 .lines
                 .iter()
@@ -229,17 +228,7 @@ impl Inputs {
 }
 
 /// The [`UnitField`] names, by bit.
-const UNIT_NAMES: [&str; 9] = [
-    "level",
-    "base mana",
-    "max health",
-    "max mana",
-    "max rage",
-    "max focus",
-    "max energy",
-    "max happiness",
-    "ranged attack time",
-];
+const UNIT_NAMES: [&str; 4] = ["level", "base mana", "base health", "ranged attack time"];
 
 /// What a sweep holds fixed for a view: the form the form input puts on, the item kind worn
 /// items are of, and the class family the tables gate on.
@@ -308,19 +297,19 @@ fn mat(layout: &Layout, inputs: Inputs, p: Params) -> Mat {
         (22, 3500),
         (34, if unit(UnitField::Level) { 60 } else { 20 }),
         (
-            28,
-            if unit(UnitField::MaxHealth) {
-                9000
-            } else {
-                4000
-            },
-        ),
-        (
             162,
             if unit(UnitField::BaseMana) {
                 2100
             } else {
                 1000
+            },
+        ),
+        (
+            163,
+            if unit(UnitField::BaseHealth) {
+                1900
+            } else {
+                1689
             },
         ),
         (
@@ -332,14 +321,6 @@ fn mat(layout: &Layout, inputs: Inputs, p: Params) -> Mat {
             },
         ),
     ];
-    for ty in 0..5u8 {
-        let max_power = if unit(UnitField::MaxPower(ty)) {
-            1500
-        } else {
-            500
-        };
-        pairs.push((29 + u16::from(ty), max_power));
-    }
     if inputs.disarm {
         pairs.push((46, 0x0020_0000));
     }
@@ -766,11 +747,7 @@ fn every_view_that_moves_with_an_input_is_requeued_by_that_input() {
         };
         let s = sweep(&mut rig, empty, &any, &own, &cause(inputs));
         assert_covered(&format!("the player's {name}"), &s);
-        // Mana costs scale by the base, and no 1.12 spell costs a percentage of a rage, focus,
-        // energy or happiness pool: those are watched all the same.
-        if !name.starts_with("max ") || name == &"max health" {
-            assert!(s.moved >= 1, "no view reads the player's {name}");
-        }
+        assert!(s.moved >= 1, "no view reads the player's {name}");
         row(name, &s);
     }
     let armed = Inputs {
@@ -1008,6 +985,38 @@ fn a_pet_view_reads_no_player_form_equipment_reach_or_unit_field_but_the_ranged_
     assert!(ranged >= 1, "no pet view reads the ranged attack time");
 }
 
+/// A pet view's cost reads `0x612c50` on the pet (`6e327b`), so the pet's base mana and base health
+/// are pet inputs, and its max health and max pools, which no cost reads, are not.
+#[test]
+fn the_pets_cost_bases_are_its_inputs_and_its_max_pools_are_not() {
+    let unit = RangeUnit::still(1.5);
+    let inputs = |pairs: &[(u16, u32)]| {
+        PetInputs::of(
+            Some(1),
+            Some(&ObjectFields::from_pairs(pairs)),
+            RangeSeen::of(&unit, None),
+        )
+    };
+    let base = inputs(&[(34, 30), (162, 900), (163, 600)]);
+    assert!(
+        inputs(&[(34, 30), (162, 901), (163, 600)]) != base,
+        "base mana"
+    );
+    assert!(
+        inputs(&[(34, 30), (162, 900), (163, 601)]) != base,
+        "base health"
+    );
+    let pools = [
+        (34, 30),
+        (162, 900),
+        (163, 600),
+        (28, 4000),
+        (29, 2000),
+        (32, 100),
+    ];
+    assert!(inputs(&pools) == base, "max health and max pools");
+}
+
 /// Every field of the pet's unit that moves a pet view is one of the pet inputs the feed rebuilds
 /// the pet views on. The fields go 48 at a time; a view that moves without a pet input moving is
 /// then narrowed to the fields that move it.
@@ -1032,18 +1041,9 @@ fn no_pet_field_moves_a_pet_view_unwatched() {
             family: 1,
         },
     );
-    // Level, max health, max power of each type, reach, base mana.
-    let base_pairs: Vec<(u16, u32)> = vec![
-        (34, 30),
-        (28, 600),
-        (29, 700),
-        (30, 1000),
-        (31, 100),
-        (32, 100),
-        (33, 10),
-        (130, 2.0f32.to_bits()),
-        (162, 900),
-    ];
+    // Level, reach, base mana, base health.
+    let base_pairs: Vec<(u16, u32)> =
+        vec![(34, 30), (130, 2.0f32.to_bits()), (162, 900), (163, 600)];
     let pet_with = |poke: std::ops::Range<u16>| {
         let mut pairs = base_pairs.clone();
         pairs.extend(poke.map(|field| (field, POKE)));
@@ -1443,21 +1443,21 @@ fn the_seen_diff_names_each_input_it_saw_move() {
     assert!(c.disarm);
     let now = player(&[(22, 100), (46, 0x0000_0008)]);
     assert!(seen(&now).changes_since(&seen(&base)).is_empty());
-    // Each unit field on its own bit: level 34, max health 28, max power 29-33, base mana 162,
-    // ranged attack time 128.
+    // Each unit field on its own bit: level 34, base mana 162, base health 163, ranged attack
+    // time 128; max health 28 and the max pools 29-33 on none, which no cost reads.
     let unit = [
-        (34u16, UnitField::Level),
-        (162, UnitField::BaseMana),
-        (28, UnitField::MaxHealth),
-        (29, UnitField::MaxPower(0)),
-        (31, UnitField::MaxPower(2)),
-        (33, UnitField::MaxPower(4)),
-        (128, UnitField::RangedTime),
+        (34u16, UnitField::Level.bit()),
+        (162, UnitField::BaseMana.bit()),
+        (163, UnitField::BaseHealth.bit()),
+        (128, UnitField::RangedTime.bit()),
+        (28, 0),
+        (29, 0),
+        (33, 0),
     ];
-    for (field, which) in unit {
+    for (field, bit) in unit {
         let now = player(&[(22, 100), (field, 77)]);
         let c = seen(&now).changes_since(&seen(&base));
-        assert_eq!(c.unit, which.bit(), "unit field {field}");
+        assert_eq!(c.unit, bit, "unit field {field}");
     }
     // A line's value moving names the line.
     let line = |value: u32| player(&[(22, 100), (718, 43), (719, value | 300 << 16)]);

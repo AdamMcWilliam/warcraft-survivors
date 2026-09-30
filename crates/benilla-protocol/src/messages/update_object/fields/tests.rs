@@ -889,3 +889,12 @@ fn rage_and_happiness_divide_for_display_but_not_for_the_raw_readers() {
     assert_eq!(feigning_warrior.unit_shown_power(RAGE), Some(0));
     assert_eq!(feigning_warrior.unit_shown_max_power(RAGE), Some(100));
 }
+
+/// `UNIT_FIELD_BASE_MANA` and `UNIT_FIELD_BASE_HEALTH` are fields 162 and 163
+/// (`UpdateFields_1_12_1.h:101-102`), the unit block's `+0x270` and `+0x274` `0x612c50` reads.
+#[test]
+fn base_mana_and_base_health_read_fields_162_and_163() {
+    let unit = ObjectFields::from_pairs(&[(162, 1500), (163, 1689)]);
+    assert_eq!(unit.unit_base_mana(), Some(1500));
+    assert_eq!(unit.unit_base_health(), Some(1689));
+}
