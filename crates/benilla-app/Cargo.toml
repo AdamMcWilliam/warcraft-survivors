@@ -32,7 +32,8 @@ half = "2"
 include_dir = "0.7"
 # The 1.12 chat filters (`text_filter`), with one `RegexSet` for the any-match pass per line.
 regex = "1"
-# `getrusage` for perf CPU time; the audio clock and render thread's realtime policy on macOS.
+# `getrusage` for perf CPU time; `localtime_r` for the log stamp; the audio clock and render
+# thread's realtime policy on macOS.
 libc = "0.2"
 # PNG encoding only: the macOS cursor's NSImage data and screenshots.
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -93,9 +94,13 @@ objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeomet
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 cpal = "0.17"
 
-# Windows CPU clocks for `perf::clock`.
+# Windows CPU clocks for `perf::clock`; `GetLocalTime` for the log stamp (`ui_chat::logging`).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
 
 # The login cycle's fake realmd runs the server half of SRP6 (`net::io::cycle_tests`).
 [dev-dependencies]

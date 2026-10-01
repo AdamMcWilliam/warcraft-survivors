@@ -1,5 +1,5 @@
 //! Broken-down UTC time from an epoch second, the calendar behind `date()` and screenshot names.
-//! Deviation: UTC where the reference's callers use local time, because the workspace has no
+//! Deviation: UTC where the reference's callers use local time, because this crate has no
 //! timezone source.
 
 /// Broken-down UTC time.
