@@ -546,6 +546,7 @@ dependencies = [
  "toml",
  "wgpu",
  "windows-sys 0.59.0",
+ "winit",
 ]
 
 [[package]]

@@ -92,6 +92,8 @@ pub(super) fn feed_ui_input(
         ResMut<UiKeyboardCapture>,
         NonSendMut<HostClipboard>,
     ),
+    // The characters the active layout makes, which name a key for a keyboard frame.
+    layout: Res<crate::bindings::LayoutNames>,
     // The uiScale dial folded into the seam scale.
     ui_scale: Res<super::UiScaleCvar>,
 ) {
@@ -232,8 +234,11 @@ pub(super) fn feed_ui_input(
             KeyCode::Tab => Some("TAB"),
             _ => None,
         };
+        // What the layout names the key: the clipboard chords' letters, and a keyboard frame's
+        // `arg1` below.
+        let token = crate::bindings::chord::key_token(ev.key_code, &layout);
         // Dispatched unconditionally: unfocused, they fall through to the camera and turn keys.
-        let chord = keymap::chord(ev.key_code, mods, mac);
+        let chord = keymap::chord(ev.key_code, token, mods, mac);
         // A keyboard frame gets these by name before their chord runs (a dialog needs BACKSPACE);
         // `frame_key_input` declines at a focused box, so no frame steals its editing keys. `true`
         // suppresses the chord and the key's binding (the reference's existence gate, `0x76b7d0`).
@@ -258,14 +263,15 @@ pub(super) fn feed_ui_input(
         }
         // Every other key reaches a keyboard frame by name too: the reference's key-down walk
         // takes its `arg1` from the table the binding chord uses (`0x4b66b0`), `chord::key_token`
-        // here, and the gate is existence, not handling: a shown keyboard frame with an
-        // `OnKeyDown` swallows the key whatever its script does (`0x76b7d0`, `0x76ba25`).
+        // under the active layout here, so the Key Bindings window stores the name the key's
+        // press dispatches by. The gate is existence, not handling: a shown keyboard frame with
+        // an `OnKeyDown` swallows the key whatever its script does (`0x76b7d0`, `0x76ba25`).
         // Consumption suppresses only the key's binding: `OnChar` is a separate dispatcher
         // (`0x765df0`), so the stack-split spinner still gets a digit its `OnKeyDown` ate, and it
         // is not a focus change, so it releases nothing held.
         else if named.is_none() {
-            if let Some(token) = crate::bindings::chord::key_token(ev.key_code) {
-                if script.frame_key_input(token) {
+            if let Some(token) = token {
+                if script.frame_key_input(&token.to_string()) {
                     capture.consumed.push(ev.key_code);
                 }
             }

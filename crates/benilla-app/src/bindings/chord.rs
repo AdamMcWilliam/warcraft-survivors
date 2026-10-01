@@ -4,15 +4,37 @@
 //!
 //! Prefix order is ALT-CTRL-SHIFT (`Blizzard_BindingUI.lua:176-182`; the emitter `0x4b6630` walks
 //! the table at `0x846bd0`), and it decides which modifier the fallback drops. Super/Cmd is not a
-//! 1.12 modifier: a chord never carries it and a press with it held never matches.
+//! 1.12 modifier, so a chord never carries it; that a press with it held runs nothing is
+//! `crate::bindings`'s deviation.
+
+use std::fmt;
 
 use bevy::input::mouse::MouseButton;
 use bevy::prelude::KeyCode;
 
-/// A bindable base input: a keyboard key, a mouse button, or one wheel direction.
+use super::layout::{LayoutName, LayoutNames};
+
+/// A key's 1.12 name: one character (`Z`, `1`, `ù`), or a word from the reference's name table
+/// (`F1`, `NUMPAD7`, `SPACE`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum KeyName {
+    Char(char),
+    Word(&'static str),
+}
+
+impl fmt::Display for KeyName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KeyName::Char(c) => write!(f, "{c}"),
+            KeyName::Word(w) => f.write_str(w),
+        }
+    }
+}
+
+/// A bindable base input: a keyboard key by its 1.12 name, a mouse button, or one wheel direction.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum BindKey {
-    Key(KeyCode),
+    Key(KeyName),
     Mouse(MouseButton),
     WheelUp,
     WheelDown,
@@ -78,143 +100,107 @@ impl Chord {
     }
 }
 
-/// The 1.12 token for a physical key; `None` for a key the reference names `UNKNOWN` and for the
-/// modifiers, which are only prefixes (`IsKeyPressIgnoredForBinding`). Both Enters are `ENTER`.
-pub(crate) fn key_token(k: KeyCode) -> Option<&'static str> {
+/// The 1.12 name a key press gets: a letter, digit or punctuation key what the active layout
+/// names it ([`LayoutNames`]), every other key its fixed name. `None` for a key the reference
+/// names `UNKNOWN` or drops, and for the modifiers, which are only prefixes
+/// (`IsKeyPressIgnoredForBinding`). Both Enters are `ENTER`.
+pub(crate) fn key_token(k: KeyCode, layout: &LayoutNames) -> Option<KeyName> {
+    match layout.name(k) {
+        // The lookup folds `a`-`z` up (`0x64b419`), so Turkish `VK_OEM_7`'s `i` is `I`'s key.
+        Some(LayoutName::Char(c)) => Some(KeyName::Char(c.to_ascii_uppercase())),
+        Some(LayoutName::Dropped) => None,
+        None => fixed_name(k),
+    }
+}
+
+/// The fixed half of `0x42d800` and the Mac table: every key no layout names
+/// ([`super::layout::position`]).
+fn fixed_name(k: KeyCode) -> Option<KeyName> {
     use KeyCode::*;
+    use KeyName::Word;
     Some(match k {
-        KeyA => "A",
-        KeyB => "B",
-        KeyC => "C",
-        KeyD => "D",
-        KeyE => "E",
-        KeyF => "F",
-        KeyG => "G",
-        KeyH => "H",
-        KeyI => "I",
-        KeyJ => "J",
-        KeyK => "K",
-        KeyL => "L",
-        KeyM => "M",
-        KeyN => "N",
-        KeyO => "O",
-        KeyP => "P",
-        KeyQ => "Q",
-        KeyR => "R",
-        KeyS => "S",
-        KeyT => "T",
-        KeyU => "U",
-        KeyV => "V",
-        KeyW => "W",
-        KeyX => "X",
-        KeyY => "Y",
-        KeyZ => "Z",
-        Digit1 => "1",
-        Digit2 => "2",
-        Digit3 => "3",
-        Digit4 => "4",
-        Digit5 => "5",
-        Digit6 => "6",
-        Digit7 => "7",
-        Digit8 => "8",
-        Digit9 => "9",
-        Digit0 => "0",
-        F1 => "F1",
-        F2 => "F2",
-        F3 => "F3",
-        F4 => "F4",
-        F5 => "F5",
-        F6 => "F6",
-        F7 => "F7",
-        F8 => "F8",
-        F9 => "F9",
-        F10 => "F10",
-        F11 => "F11",
-        F12 => "F12",
+        F1 => Word("F1"),
+        F2 => Word("F2"),
+        F3 => Word("F3"),
+        F4 => Word("F4"),
+        F5 => Word("F5"),
+        F6 => Word("F6"),
+        F7 => Word("F7"),
+        F8 => Word("F8"),
+        F9 => Word("F9"),
+        F10 => Word("F10"),
+        F11 => Word("F11"),
+        F12 => Word("F12"),
         // On a Mac F13 is print-screen: the Mac key table `0x5bf320` maps keycode `0x69` to
         // `0x212`, `PRINTSCREEN`, and macOS has no PrintScreen keycode.
         #[cfg(target_os = "macos")]
-        F13 => "PRINTSCREEN",
+        F13 => Word("PRINTSCREEN"),
         // `IsValidBindingKeyString` accepts `F` + any digits (`0x846c04`) and the Mac table maps
         // keycode `0x6A` to `F16` (`0x30d`). Deviation: the Windows key table stops at `VK_F12`
         // and drops later F-keys; they are named here so a stored `F13`-`F24` can be pressed.
         #[cfg(not(target_os = "macos"))]
-        F13 => "F13",
+        F13 => Word("F13"),
         // On a Mac F14 and F15 are ScrollLock and Pause: keycodes `0x6B` and `0x71` map to
         // `0x210` and `0x211`, which the namer calls `UNKNOWN`, so they stay unbindable there.
         #[cfg(not(target_os = "macos"))]
-        F14 => "F14",
+        F14 => Word("F14"),
         #[cfg(not(target_os = "macos"))]
-        F15 => "F15",
-        F16 => "F16",
-        F17 => "F17",
-        F18 => "F18",
-        F19 => "F19",
-        F20 => "F20",
-        F21 => "F21",
-        F22 => "F22",
-        F23 => "F23",
-        F24 => "F24",
-        Space => "SPACE",
-        Tab => "TAB",
-        Enter | NumpadEnter => "ENTER",
-        Escape => "ESCAPE",
-        Backspace => "BACKSPACE",
-        Insert => "INSERT",
-        Delete => "DELETE",
-        Home => "HOME",
-        End => "END",
-        PageUp => "PAGEUP",
-        PageDown => "PAGEDOWN",
-        ArrowUp => "UP",
-        ArrowDown => "DOWN",
-        ArrowLeft => "LEFT",
-        ArrowRight => "RIGHT",
-        Numpad0 => "NUMPAD0",
-        Numpad1 => "NUMPAD1",
-        Numpad2 => "NUMPAD2",
-        Numpad3 => "NUMPAD3",
-        Numpad4 => "NUMPAD4",
-        Numpad5 => "NUMPAD5",
-        Numpad6 => "NUMPAD6",
-        Numpad7 => "NUMPAD7",
-        Numpad8 => "NUMPAD8",
-        Numpad9 => "NUMPAD9",
-        NumpadAdd => "NUMPADPLUS",
-        NumpadSubtract => "NUMPADMINUS",
-        NumpadDivide => "NUMPADDIVIDE",
-        NumpadMultiply => "NUMPADMULTIPLY",
-        NumpadDecimal => "NUMPADDECIMAL",
+        F15 => Word("F15"),
+        F16 => Word("F16"),
+        F17 => Word("F17"),
+        F18 => Word("F18"),
+        F19 => Word("F19"),
+        F20 => Word("F20"),
+        F21 => Word("F21"),
+        F22 => Word("F22"),
+        F23 => Word("F23"),
+        F24 => Word("F24"),
+        Space => Word("SPACE"),
+        Tab => Word("TAB"),
+        Enter | NumpadEnter => Word("ENTER"),
+        Escape => Word("ESCAPE"),
+        Backspace => Word("BACKSPACE"),
+        Insert => Word("INSERT"),
+        Delete => Word("DELETE"),
+        Home => Word("HOME"),
+        End => Word("END"),
+        PageUp => Word("PAGEUP"),
+        PageDown => Word("PAGEDOWN"),
+        ArrowUp => Word("UP"),
+        ArrowDown => Word("DOWN"),
+        ArrowLeft => Word("LEFT"),
+        ArrowRight => Word("RIGHT"),
+        Numpad0 => Word("NUMPAD0"),
+        Numpad1 => Word("NUMPAD1"),
+        Numpad2 => Word("NUMPAD2"),
+        Numpad3 => Word("NUMPAD3"),
+        Numpad4 => Word("NUMPAD4"),
+        Numpad5 => Word("NUMPAD5"),
+        Numpad6 => Word("NUMPAD6"),
+        Numpad7 => Word("NUMPAD7"),
+        Numpad8 => Word("NUMPAD8"),
+        Numpad9 => Word("NUMPAD9"),
+        NumpadAdd => Word("NUMPADPLUS"),
+        NumpadSubtract => Word("NUMPADMINUS"),
+        NumpadDivide => Word("NUMPADDIVIDE"),
+        NumpadMultiply => Word("NUMPADMULTIPLY"),
+        NumpadDecimal => Word("NUMPADDECIMAL"),
         // The Mac keypad's `=`: the namer's `0x30c`, and in `IsValidBindingKeyString`'s table.
-        NumpadEqual => "NUMPADEQUALS",
-        NumLock => "NUMLOCK",
-        PrintScreen => "PRINTSCREEN",
+        NumpadEqual => Word("NUMPADEQUALS"),
+        NumLock => Word("NUMLOCK"),
+        PrintScreen => Word("PRINTSCREEN"),
         // No ScrollLock or Pause: the namer (`0x4b66b0`) calls `0x210`/`0x211` `UNKNOWN`, and
         // `IsValidBindingKeyString` (`0x4b7890`) has neither name.
-        CapsLock => "CAPSLOCK",
-        Minus => "-",
-        Equal => "=",
-        BracketLeft => "[",
-        BracketRight => "]",
-        Backslash => "\\",
-        Semicolon => ";",
-        Quote => "'",
-        Comma => ",",
-        Period => ".",
-        Slash => "/",
-        Backquote => "`",
+        CapsLock => Word("CAPSLOCK"),
         _ => return None,
     })
 }
 
-/// Fold key aliases that share one 1.12 token (`NumpadEnter` → `Enter`) so a chord parsed from
-/// `ENTER` matches either physical key.
+/// Fold the keys the reference gives one code (`NumpadEnter` → `Enter`, both `0x201`), so the
+/// pressed-key list and a latch treat them as one key.
 pub(crate) fn normalize_key(k: KeyCode) -> KeyCode {
     match k {
         KeyCode::NumpadEnter => KeyCode::Enter,
-        // The Mac print-screen key; must agree with `key_token`, which names it for capture.
-        #[cfg(target_os = "macos")]
-        KeyCode::F13 => KeyCode::PrintScreen,
         other => other,
     }
 }
@@ -251,43 +237,15 @@ fn token_key(t: &str) -> Option<BindKey> {
         "MOUSEWHEELDOWN" => return Some(BindKey::WheelDown),
         _ => {}
     }
+    // One character: what a layout names some key, which the namer writes as UTF-8 (`0x4b66b0`'s
+    // `[0x21, 0xff]` arm through `0x41abb0`). [`key_token`] folds `a`-`z` up as the lookup does,
+    // so a lowercase letter is no press's name.
+    let mut chars = t.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        let pressable = !c.is_control() && !c.is_whitespace() && !c.is_ascii_lowercase();
+        return pressable.then_some(BindKey::Key(KeyName::Char(c)));
+    }
     let k = match t {
-        "A" => KeyA,
-        "B" => KeyB,
-        "C" => KeyC,
-        "D" => KeyD,
-        "E" => KeyE,
-        "F" => KeyF,
-        "G" => KeyG,
-        "H" => KeyH,
-        "I" => KeyI,
-        "J" => KeyJ,
-        "K" => KeyK,
-        "L" => KeyL,
-        "M" => KeyM,
-        "N" => KeyN,
-        "O" => KeyO,
-        "P" => KeyP,
-        "Q" => KeyQ,
-        "R" => KeyR,
-        "S" => KeyS,
-        "T" => KeyT,
-        "U" => KeyU,
-        "V" => KeyV,
-        "W" => KeyW,
-        "X" => KeyX,
-        "Y" => KeyY,
-        "Z" => KeyZ,
-        "1" => Digit1,
-        "2" => Digit2,
-        "3" => Digit3,
-        "4" => Digit4,
-        "5" => Digit5,
-        "6" => Digit6,
-        "7" => Digit7,
-        "8" => Digit8,
-        "9" => Digit9,
-        "0" => Digit0,
         "F1" => F1,
         "F2" => F2,
         "F3" => F3,
@@ -346,26 +304,13 @@ fn token_key(t: &str) -> Option<BindKey> {
         "NUMLOCK" => NumLock,
         "PRINTSCREEN" => PrintScreen,
         "CAPSLOCK" => CapsLock,
-        "-" => Minus,
-        "=" => Equal,
-        "[" => BracketLeft,
-        "]" => BracketRight,
-        "\\" => Backslash,
-        ";" => Semicolon,
-        "'" => Quote,
-        "," => Comma,
-        "." => Period,
-        "/" => Slash,
-        "`" => Backquote,
         _ => return None,
     };
-    // Fold aliases so a parsed chord equals a normalized press, and accept only a token the
-    // namer produces on this platform (on a Mac, F13-F15 are other keys).
-    let k = normalize_key(k);
-    if key_token(k) != Some(t) {
-        return None;
+    // Only a name the namer gives on this platform: on a Mac, F13-F15 are other keys.
+    match fixed_name(k) {
+        Some(name @ KeyName::Word(w)) if w == t => Some(BindKey::Key(name)),
+        _ => None,
     }
-    Some(BindKey::Key(k))
 }
 
 #[cfg(test)]
@@ -397,6 +342,7 @@ mod tests {
                 "{command}: default '{default}' does not parse"
             );
         }
+        let us = LayoutNames::default();
         for k in [
             KeyCode::KeyW,
             KeyCode::Digit0,
@@ -431,9 +377,9 @@ mod tests {
             KeyCode::Slash,
             KeyCode::Backquote,
         ] {
-            let token = key_token(k).expect("named");
+            let token = key_token(k, &us).expect("named").to_string();
             assert!(
-                normalize_binding_key(token).is_some(),
+                normalize_binding_key(&token).is_some(),
                 "{k:?} names '{token}', which SetBinding refuses"
             );
         }
@@ -447,8 +393,8 @@ mod tests {
             assert!(normalize_binding_key(token).is_some());
         }
         // The reference's namer calls these `UNKNOWN` (`0x210`/`0x211`).
-        assert_eq!(key_token(KeyCode::ScrollLock), None);
-        assert_eq!(key_token(KeyCode::Pause), None);
+        assert_eq!(key_token(KeyCode::ScrollLock, &us), None);
+        assert_eq!(key_token(KeyCode::Pause, &us), None);
     }
 
     /// The validator's accept set is infinite, so this covers the tokens a real keyboard or mouse
@@ -517,6 +463,7 @@ mod tests {
 
     #[test]
     fn the_codec_round_trips_every_keyboard_token() {
+        let us = LayoutNames::default();
         let mut checked = 0;
         for k in [
             KeyCode::KeyW,
@@ -530,38 +477,33 @@ mod tests {
             KeyCode::Backquote,
             KeyCode::Quote,
         ] {
-            let t = key_token(k).unwrap();
+            let name = key_token(k, &us).unwrap();
             assert_eq!(
-                token_key(t),
-                Some(BindKey::Key(normalize_key(k))),
-                "token {t}"
+                token_key(&name.to_string()),
+                Some(BindKey::Key(name)),
+                "token {name}"
             );
             checked += 1;
         }
         assert_eq!(checked, 10);
-        assert_eq!(key_token(KeyCode::NumpadEnter), Some("ENTER"));
-        assert_eq!(token_key("ENTER"), Some(BindKey::Key(KeyCode::Enter)));
+        let enter = Some(KeyName::Word("ENTER"));
+        assert_eq!(key_token(KeyCode::NumpadEnter, &us), enter);
+        assert_eq!(key_token(KeyCode::Enter, &us), enter);
+        assert_eq!(token_key("ENTER"), enter.map(BindKey::Key));
     }
 
     /// macOS has no `PrintScreen`, so capture and dispatch must both read F13 as `PRINTSCREEN`.
     #[cfg(target_os = "macos")]
     #[test]
     fn f13_is_print_screen_on_a_mac() {
-        assert_eq!(
-            key_token(KeyCode::F13),
-            Some("PRINTSCREEN"),
-            "the capture arm"
-        );
-        assert_eq!(
-            normalize_key(KeyCode::F13),
-            KeyCode::PrintScreen,
-            "the dispatch arm"
-        );
+        let name = key_token(KeyCode::F13, &LayoutNames::default());
+        assert_eq!(name, Some(KeyName::Word("PRINTSCREEN")));
         assert_eq!(
             token_key("PRINTSCREEN"),
-            Some(BindKey::Key(normalize_key(KeyCode::F13))),
+            name.map(BindKey::Key),
             "a chord parsed from the shipped default matches an F13 press"
         );
+        assert_eq!(token_key("F13"), None, "no Mac key is F13");
     }
 
     #[test]
@@ -572,7 +514,7 @@ mod tests {
                 alt: true,
                 ctrl: true,
                 shift: true,
-                key: BindKey::Key(KeyCode::F1)
+                key: BindKey::Key(KeyName::Word("F1"))
             })
         );
         // `CTRL--` is Ctrl + the minus key.
@@ -582,7 +524,7 @@ mod tests {
                 alt: false,
                 ctrl: true,
                 shift: false,
-                key: BindKey::Key(KeyCode::Minus)
+                key: BindKey::Key(KeyName::Char('-'))
             })
         );
         assert_eq!(
@@ -610,8 +552,142 @@ mod tests {
                 alt: true,
                 ctrl: false,
                 shift: true,
-                key: BindKey::Key(KeyCode::PageDown)
+                key: BindKey::Key(KeyName::Word("PAGEDOWN"))
             }
+        );
+    }
+
+    /// The names a layout gives its keys, as `layout::record_layout_names` keeps them.
+    fn layout(keys: &[(KeyCode, char)]) -> LayoutNames {
+        let mut names = LayoutNames::default();
+        for &(k, c) in keys {
+            names.set(k, Some(LayoutName::Char(c)));
+        }
+        names
+    }
+
+    fn name(k: KeyCode, layout: &LayoutNames) -> Option<String> {
+        key_token(k, layout).map(|n| n.to_string())
+    }
+
+    /// 1.12 names a letter, digit or punctuation key what the active layout names it, its ASCII
+    /// letters folded up as the lookup folds them, and every other key by the fixed table. AZERTY
+    /// on Windows: `VK_Z` where a US W sits, `VK_M` on the semicolon key.
+    #[test]
+    fn a_layout_key_is_named_what_its_layout_names_it() {
+        use KeyCode::*;
+        let mut azerty = layout(&[
+            (KeyW, 'Z'),
+            (KeyZ, 'W'),
+            (KeyQ, 'A'),
+            (KeyA, 'Q'),
+            (Semicolon, 'M'),
+            (KeyM, ','),
+            (Comma, ';'),
+            (Period, ':'),
+            (Slash, '!'),
+            (Quote, 'ù'),
+            (Backquote, '²'),
+            (Minus, ')'),
+            (BracketLeft, '^'),
+            (BracketRight, '$'),
+            (Backslash, '*'),
+            (IntlBackslash, '<'),
+            (NumpadComma, '.'),
+            (Digit1, '1'),
+        ]);
+        // Turkish Q's `VK_OEM_7` names its key `i`, which the lookup folds to `I`.
+        azerty.set(KeyCode::KeyI, Some(LayoutName::Char('i')));
+        for (k, expected) in [
+            (KeyW, "Z"),
+            (KeyZ, "W"),
+            (KeyQ, "A"),
+            (KeyA, "Q"),
+            (Semicolon, "M"),
+            (KeyM, ","),
+            (Comma, ";"),
+            (Period, ":"),
+            (Slash, "!"),
+            (Quote, "ù"),
+            (Backquote, "²"),
+            (Minus, ")"),
+            (BracketLeft, "^"),
+            (BracketRight, "$"),
+            (Backslash, "*"),
+            (IntlBackslash, "<"),
+            (NumpadComma, "."),
+            (Digit1, "1"),
+            (KeyI, "I"),
+            (F1, "F1"),
+            (Numpad7, "NUMPAD7"),
+            (Space, "SPACE"),
+        ] {
+            assert_eq!(name(k, &azerty).as_deref(), Some(expected), "{k:?}");
+            let token = key_token(k, &azerty).unwrap();
+            assert_eq!(
+                token_key(expected),
+                Some(BindKey::Key(token)),
+                "the stored '{expected}' is that key's chord"
+            );
+        }
+        // A key its layout drops binds nothing (`0x42da49`).
+        azerty.set(Backquote, Some(LayoutName::Dropped));
+        assert_eq!(name(Backquote, &azerty), None);
+    }
+
+    /// A US layout, reported or not, names every key as it always has.
+    #[test]
+    fn a_us_layout_names_its_keys_as_the_us_positions() {
+        use KeyCode::*;
+        let reported = layout(&[
+            (KeyW, 'w'),
+            (KeyZ, 'z'),
+            (Quote, '\''),
+            (Backquote, '`'),
+            (Minus, '-'),
+            (IntlBackslash, '\\'),
+        ]);
+        let unreported = LayoutNames::default();
+        for layout in [&reported, &unreported] {
+            for (k, expected) in [
+                (KeyW, "W"),
+                (KeyZ, "Z"),
+                (Quote, "'"),
+                (Backquote, "`"),
+                (Minus, "-"),
+                (Digit1, "1"),
+            ] {
+                assert_eq!(name(k, layout).as_deref(), Some(expected), "{k:?}");
+            }
+        }
+        assert_eq!(name(IntlBackslash, &reported).as_deref(), Some("\\"));
+        assert_eq!(
+            name(IntlBackslash, &unreported),
+            None,
+            "an ISO key no layout has named yet"
+        );
+    }
+
+    /// Modifiers are prefixes, never part of the name: Shift+1 is `SHIFT-1`, not `!`.
+    #[test]
+    fn a_chord_names_its_key_unshifted() {
+        let azerty = layout(&[(KeyCode::KeyW, 'z')]);
+        let key = |k| BindKey::Key(key_token(k, &azerty).unwrap());
+        assert_eq!(
+            Chord::parse("SHIFT-Z").map(|c| (c.shift, c.key)),
+            Some((true, key(KeyCode::KeyW)))
+        );
+        assert_eq!(
+            Chord::parse("SHIFT-1").map(|c| (c.shift, c.key)),
+            Some((true, key(KeyCode::Digit1)))
+        );
+        // Nothing presses a lowercase letter, a space or a control character.
+        for t in ["w", " ", "\u{7}"] {
+            assert_eq!(Chord::parse(t), None, "{t:?}");
+        }
+        assert_eq!(
+            Chord::parse("ù").map(|c| c.key),
+            Some(BindKey::Key(KeyName::Char('ù')))
         );
     }
 }
