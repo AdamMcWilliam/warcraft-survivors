@@ -90,9 +90,10 @@ pub(crate) struct IdleGates {
     /// `UNIT_FIELD_MOUNTDISPLAYID > 0`, the sit's.
     pub(crate) mounted: bool,
     /// The sit's fourth gate (`0x482f84 call 0x6103a0`): for a solo player, the movement-action
-    /// mode `[0xc4d888]` at its in-world `0xc`. `/follow` sets 3 (`FollowUnit 0x489e00`) and
-    /// autorun never moves it, so a follower whose target has stopped is not seated.
-    pub(crate) following: bool,
+    /// mode `[0xc4d888]` at its in-world `0xc`. `/follow` sets 3 (`FollowUnit 0x489e00`), Click to
+    /// Move 5 to 9, and autorun never moves it, so a follower whose target has stopped is not
+    /// seated.
+    pub(crate) auto_moving: bool,
     /// `UNIT_FIELD_FLAGS` bit 20 (`0x100000`), the AFK's, not the sit's.
     pub(crate) on_taxi: bool,
     /// The optimistic mirror `[0xb6e5cc]`: the AFK's second gate, and its anti-repeat.
@@ -114,7 +115,7 @@ pub(crate) fn idle_action(idle: Duration, gates: IdleGates) -> IdleAction {
         };
     }
     IdleAction {
-        sit: gates.stand_state == 0 && !gates.in_combat && !gates.mounted && !gates.following,
+        sit: gates.stand_state == 0 && !gates.in_combat && !gates.mounted && !gates.auto_moving,
         afk: !gates.on_taxi && !gates.afk,
         camp: false,
     }
@@ -131,6 +132,7 @@ pub(crate) fn idle_handler(
     commands: Res<crate::net::NetCommands>,
     mut stand: MessageWriter<crate::player::StandStateRequest>,
     follow: Res<crate::player::FollowState>,
+    approach: Res<crate::player::Approach>,
     logout: Res<crate::ui_logout::LogoutState>,
 ) {
     let idle = time.elapsed().saturating_sub(last.0);
@@ -148,7 +150,7 @@ pub(crate) fn idle_handler(
             mounted: store.0.unit_mount_display_id() != 0,
             on_taxi: flags & crate::player::UNIT_FLAG_TAXI_FLIGHT != 0,
             afk: mirror.is_afk(),
-            following: follow.guid.is_some(),
+            auto_moving: follow.guid.is_some() || approach.active(),
         }
     });
     let action = match gates {
@@ -325,7 +327,7 @@ mod tests {
                  `[0xc4d888]` non-`0xc` implies translating, which `stand_state_refused` refuses \
                  downstream. The AFK mark is untouched: it is not one of the sit's gates",
                 IdleGates {
-                    following: true,
+                    auto_moving: true,
                     ..open()
                 },
                 IdleAction {
@@ -501,6 +503,7 @@ mod tests {
             .init_resource::<ChatLog>()
             .init_resource::<LastInput>()
             .init_resource::<crate::player::FollowState>()
+            .init_resource::<crate::player::Approach>()
             .init_resource::<crate::ui_logout::LogoutState>()
             .add_message::<crate::player::StandStateRequest>()
             .insert_resource(NetCommands(tx));

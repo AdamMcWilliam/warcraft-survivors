@@ -296,10 +296,11 @@ pub(crate) struct Player {
     /// current bit (`0x60e080`). Observers read our gait off it, and it is in the server-authored
     /// merge mask, so a server move can flip it ([`super::wire_in`]); it owes no ack.
     pub(super) walking: bool,
-    /// `/follow` holding forward this frame: the reference's follow pushes W's own bit
-    /// (`0x60e790`), so this is a [`forward_axis`] term. Rewritten each frame by
-    /// [`super::follow::steer_follow`] just before the controller reads it.
-    pub(super) follow_forward: bool,
+    /// The auto-move (`/follow` or Click to Move) holding forward this frame: the reference pushes
+    /// W's own bit (`0x60e790`), so this is a [`forward_axis`] term. Rewritten each frame by
+    /// [`super::follow::steer_follow`] and [`super::approach::steer_approach`] just before the
+    /// controller reads it.
+    pub(super) auto_forward: bool,
     /// Free-fly (`F`): the camera moves on its own and the avatar/server position is frozen.
     pub(crate) detached: bool,
     /// `SMSG_CLIENT_CONTROL_UPDATE` with `allowMove = 0` named the unit we drive: us, while someone

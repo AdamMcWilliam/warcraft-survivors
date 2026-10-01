@@ -406,6 +406,7 @@ pub(super) fn follow_requests(
     cast: Res<crate::spell::PendingCast>,
     mut errors: ResMut<crate::ui_action::UiErrorKeys>,
     mut follow: ResMut<crate::player::FollowState>,
+    mut approach: ResMut<crate::player::Approach>,
 ) {
     for request in requests.read() {
         let resolved = match request {
@@ -448,6 +449,8 @@ pub(super) fn follow_requests(
         match resolved {
             Some((guid, name)) => {
                 info!("follow: now following \"{name}\" guid {guid:#x}");
+                // The arm `0x611130` cancels what runs first: one auto-move cell.
+                approach.stop();
                 follow.start(guid, name);
             }
             None => {

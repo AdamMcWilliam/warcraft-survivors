@@ -7,7 +7,7 @@
 //! A player's movement start cancels it on the key-down edge: the start emitters call `0x60e990`,
 //! which cancels at `0x60e9b5` unless bit 0 of `ds:0xc4da48` is set, and only follow's own emitters
 //! (`0x60e790`, `0x60e7f0`, `0x60e8a0`, `0x60e940`) set it; ours is a flag,
-//! [`Player::follow_forward`], so it never reaches the cancel. Jump survives (`0x60e990(0, 0)` at
+//! [`Player::auto_forward`], so it never reaches the cancel. Jump survives (`0x60e990(0, 0)` at
 //! `0x60dea8`), as do key releases, sitting, the walk toggle, damage, combat, mounting, casting and
 //! the followee leaving range (`0x6107e5` skips follow's mode at `0x610749`, `0x610752`).
 //!
@@ -29,10 +29,10 @@ use super::state::{MoveSpeed, Player};
 const TURN_RATE: f32 = PI;
 
 /// Inside this many radians of the bearing, follow stops turning (`0x6108bb` → `0x60e920`).
-const TURN_DEADZONE: f32 = 0.001;
+pub(super) const TURN_DEADZONE: f32 = 0.001;
 
 /// The speed the thresholds scale by (`0x80c4d0`), the base run speed.
-const SPEED_NORM: f32 = 7.0;
+pub(super) const SPEED_NORM: f32 = 7.0;
 
 /// The base stop distance (`0x80c4c0`), a constant, not a CVar.
 const STOP_DISTANCE: f32 = 3.0;
@@ -116,7 +116,7 @@ fn follow_cancelled(
 }
 
 /// Wrap an angle into `[-π, π)`.
-fn wrap_pi(a: f32) -> f32 {
+pub(super) fn wrap_pi(a: f32) -> f32 {
     let t = std::f32::consts::TAU;
     let x = (a + PI).rem_euclid(t);
     x - PI
@@ -124,23 +124,23 @@ fn wrap_pi(a: f32) -> f32 {
 
 /// The `face_yaw` pointing at a horizontal Bevy-space delta, matching `control`'s forward
 /// `from_rotation_y(y) * NEG_Z = (-sin y, 0, -cos y)`: `y = atan2(-dx, -dz)`.
-fn bearing_to(delta: Vec3) -> f32 {
+pub(super) fn bearing_to(delta: Vec3) -> f32 {
     (-delta.x).atan2(-delta.z)
 }
 
 /// The followee is within 1° of straight up or down, where the bearing means nothing (`0x610d32`).
-fn vertically_degenerate(delta: Vec3) -> bool {
+pub(super) fn vertically_degenerate(delta: Vec3) -> bool {
     let dist = delta.length();
     dist > f32::EPSILON && delta.y.abs() / dist > VERTICAL_ALIGN_COS
 }
 
 /// Turn toward `bearing` by at most `rate × dt`, not inside the deadzone (`0x6103d0`).
-fn steer(face: f32, bearing: f32, dt: f32) -> f32 {
+pub(super) fn steer(face: f32, bearing: f32, rate: f32, dt: f32) -> f32 {
     let remaining = wrap_pi(bearing - face);
     if remaining.abs() <= TURN_DEADZONE {
         return face;
     }
-    let budget = TURN_RATE * dt;
+    let budget = rate * dt;
     face + remaining.clamp(-budget, budget)
 }
 
@@ -176,6 +176,26 @@ impl FollowInput<'_, '_> {
         .any(|&c| self.binds.just_pressed(c))
     }
 
+    /// The cancel set, the start emitters' `0x60e990` and the input tick's teardown, which end any
+    /// auto-move.
+    pub(super) fn cancels(&self, player: &Player) -> bool {
+        // The world's buttons, not the device's: the both-button run is two bindings held, and a
+        // press a UI frame captured dispatches neither.
+        let both_engaged = self.rig.world_mouse.both() && self.rig.world_mouse.rose();
+        follow_cancelled(
+            self.move_start(),
+            // The on edge: `control` toggles `autorun` after this, so the flag is the pre-toggle
+            // value.
+            self.buttons.just_pressed(MouseButton::Forward) && !player.autorun,
+            both_engaged,
+            self.rig.look == Some(LookButton::Right),
+            // The teardown leg, or the body handed to a server spline; the ride term is not one of
+            // the reference's conjuncts (`0x5144e0`), and its reference side is untraced.
+            self.input_torn_down(player.modes.rooted, player.foreign_mover.is_none())
+                || player.server_riding(),
+        )
+    }
+
     /// The input tick's teardown leg ([`super::state::MoverInput::torn_down`]), which the reference
     /// takes (`0x5146d6 call 0x60fb60`) only with both predicates down (`0x5146c3`, `0x5146ce`):
     /// death, far sight, or root and stun together end a follow, a root alone does not.
@@ -193,7 +213,7 @@ impl FollowInput<'_, '_> {
     }
 }
 
-/// Cancel, re-resolve the followee, steer, and set [`Player::follow_forward`] for `control`. The
+/// Cancel, re-resolve the followee, steer, and set [`Player::auto_forward`] for `control`. The
 /// cancel comes first, as the reference's start emitters run ahead of the axis math (`0x5150a7` vs
 /// the emitter tail `0x5151a0`).
 pub(super) fn steer_follow(
@@ -205,25 +225,11 @@ pub(super) fn steer_follow(
     transforms: Query<&Transform>,
     input: FollowInput,
 ) {
-    player.follow_forward = false;
+    player.auto_forward = false;
     if follow.guid.is_none() {
         return;
     }
-    // ── The cancel set ──
-    // The world's buttons, not the device's: the both-button run is two bindings held, and a
-    // press a UI frame captured dispatches neither.
-    let both_engaged = input.rig.world_mouse.both() && input.rig.world_mouse.rose();
-    if follow_cancelled(
-        input.move_start(),
-        // The on edge: `control` toggles `autorun` after this, so the flag is the pre-toggle value.
-        input.buttons.just_pressed(MouseButton::Forward) && !player.autorun,
-        both_engaged,
-        input.rig.look == Some(LookButton::Right),
-        // The teardown leg, or the body handed to a server spline; the ride term is not one of the
-        // reference's conjuncts (`0x5144e0`), and its reference side is untraced.
-        input.input_torn_down(player.modes.rooted, player.foreign_mover.is_none())
-            || player.server_riding(),
-    ) {
+    if input.cancels(&player) {
         info!("follow: cancelled by the player's own movement input");
         follow.stop();
         return;
@@ -253,7 +259,7 @@ pub(super) fn steer_follow(
         return;
     }
     let bearing = bearing_to(flat);
-    player.face_yaw = steer(player.face_yaw, bearing, time.delta_secs());
+    player.face_yaw = steer(player.face_yaw, bearing, TURN_RATE, time.delta_secs());
     let moving = should_move(follow.moving, distance, speed.value);
     if moving != follow.moving {
         info!(
@@ -283,7 +289,7 @@ pub(super) fn steer_follow(
         }
     }
     follow.moving = moving;
-    player.follow_forward = moving;
+    player.auto_forward = moving;
 }
 
 /// Whether `WOW_FOLLOW_TRACE` is set, read once.
@@ -350,18 +356,18 @@ mod tests {
     #[test]
     fn the_turn_is_rate_limited_and_has_a_deadzone() {
         // 180°/s for a 0.1 s tick is 18° of the 90°.
-        let after = steer(0.0, PI / 2.0, 0.1);
+        let after = steer(0.0, PI / 2.0, TURN_RATE, 0.1);
         assert!(
             (after - TURN_RATE * 0.1).abs() < 1e-6,
             "clamped to the budget"
         );
-        assert!((steer(0.0, 0.05, 1.0) - 0.05).abs() < 1e-6);
-        assert_eq!(steer(1.0, 1.0 + TURN_DEADZONE / 2.0, 1.0), 1.0);
+        assert!((steer(0.0, 0.05, TURN_RATE, 1.0) - 0.05).abs() < 1e-6);
+        assert_eq!(steer(1.0, 1.0 + TURN_DEADZONE / 2.0, TURN_RATE, 1.0), 1.0);
     }
 
     #[test]
     fn steering_takes_the_short_way_round() {
-        let after = steer(PI - 0.05, -PI + 0.05, 1.0);
+        let after = steer(PI - 0.05, -PI + 0.05, TURN_RATE, 1.0);
         assert!(
             wrap_pi(after - (PI - 0.05)) > 0.0,
             "should wrap forward across ±π"

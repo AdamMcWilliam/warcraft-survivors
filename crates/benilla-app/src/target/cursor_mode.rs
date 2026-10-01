@@ -150,12 +150,16 @@ const ATTACK_RANGE_SQ: f32 = 109.2025;
 /// floor, so large creatures reach farther. Gates skin (`0x6e3480`) and loot (`CanLootNow
 /// 0x5ec110`), center to center, boundary-inclusive.
 const MELEE_OFFSET: f32 = 1.333_33;
-const MELEE_FLOOR: f32 = 5.0;
+pub(super) const MELEE_FLOOR: f32 = 5.0;
+
+pub(super) fn melee_reach(target: &ObjectStore, me: &ObjectStore) -> f32 {
+    (target.0.unit_combat_reach() + me.0.unit_combat_reach() + MELEE_OFFSET).max(MELEE_FLOOR)
+}
 
 /// A corpse's interact reach, squared: a flat 5 yd, since a corpse has no combat reach and the
 /// melee formula falls to its floor. `CanLootNow 0x5ec110` and the `CMSG_LOOT` sender `0x5df130`
 /// both compare against 25.0.
-const CORPSE_INTERACT_RANGE_SQ: f32 = 25.0;
+pub(super) const CORPSE_INTERACT_RANGE_SQ: f32 = 25.0;
 
 /// `GAMEOBJECT_TYPE_GENERIC`: decoration whose highlightable slot is constant false (`0x5f47f0`),
 /// so it never shows an interact cursor.
@@ -203,7 +207,7 @@ pub(crate) const GO_TYPE_FISHINGNODE: i32 = 17;
 /// `GAMEOBJECT_TYPE_CHAIR` (7): its own range predicate `0x5f5670` accepts within 3.0 yd
 /// (`[0xc4d808]`, written only by `0x5f98b0` as 3.0 squared).
 pub(crate) const GO_TYPE_CHAIR: i32 = 7;
-fn go_interact_range_sq(type_id: i32) -> f32 {
+pub(super) fn go_interact_range_sq(type_id: i32) -> f32 {
     match type_id {
         GO_TYPE_FISHINGNODE => 100.0 * 100.0,
         // Measured to the object; the reference (seats from `0x5f5760`) and vmangos
@@ -493,6 +497,8 @@ struct CorpseFacts {
     dist_sq: f32,
     /// The already-looting override: `[player+0x1d28/2c] == corpse GUID`.
     looting_this: bool,
+    /// `CanAutoInteract`, which `CanLootNow` asks first and then skips its range (`0x5ec11b`).
+    can_auto_interact: bool,
     auto_loot: bool,
     /// Key 0, shift.
     shift_held: bool,
@@ -502,7 +508,7 @@ fn corpse_cursor(f: CorpseFacts) -> Option<(CursorKind, bool)> {
     // Leg 1, lootable: able within `CanLootNow 0x5ec110`'s reach or while this corpse's loot
     // window is open; Pickup or LootAll by key 0 (`0x41f8f0` at `0x4827f8`), grayed at `0x482818`.
     if f.lootable {
-        let able = f.dist_sq <= CORPSE_INTERACT_RANGE_SQ || f.looting_this;
+        let able = f.can_auto_interact || f.dist_sq <= CORPSE_INTERACT_RANGE_SQ || f.looting_this;
         return Some((loot_cursor(f.auto_loot, f.shift_held), !able));
     }
     // Leg 2, the PvP insignia (`0x482875..0x4828a2`), inert in 1.12.1 as no player holds a
@@ -523,7 +529,7 @@ pub(super) fn classify_cursor(
     reputations: Res<Reputations>,
     (mut cursor, mut fork): (ResMut<WorldCursor>, ResMut<AttackFork>),
     // `control_lost` is the attack leg's `[0xb4b3e4]` clear.
-    player: Res<crate::player::Player>,
+    (player, approach): (Res<crate::player::Player>, Res<crate::player::Approach>),
     units: Query<(
         &Transform,
         Option<&ObjectStore>,
@@ -542,6 +548,11 @@ pub(super) fn classify_cursor(
     // `[0xb72038]`, the queued area; absent in a headless build, which reads as not queued.
     stone: Option<Res<crate::ui_dialog_verbs::MeetingStone>>,
 ) {
+    let can_auto_interact = crate::player::can_auto_interact(
+        approach.enabled,
+        self_q.single().ok().map(|(_, s)| s),
+        &player,
+    );
     // A GameObject that is not highlightable clears the cursor, as the reference's handler does.
     let resolve_go = || {
         let (go_tf, store, anim) = units.get(hovered_object.target?).ok()?;
@@ -606,8 +617,7 @@ pub(super) fn classify_cursor(
         let store = store?;
         let (self_tf, self_store) = self_q.single().ok()?;
         let dist_sq = unit_tf.translation.distance_squared(self_tf.translation);
-        let reach = (store.0.unit_combat_reach() + self_store.0.unit_combat_reach() + MELEE_OFFSET)
-            .max(MELEE_FLOOR);
+        let reach = melee_reach(store, self_store);
         let in_melee = dist_sq <= reach * reach;
 
         let dead = store.0.unit_is_dead();
@@ -616,7 +626,10 @@ pub(super) fn classify_cursor(
                 // Grayed by `CanLootNow 0x5ec110`'s melee reach; the reference's mid-loot state
                 // block and open-loot-window override are not applied to units.
                 let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-                return Some((loot_cursor(loot_cfg.auto_loot, shift), !in_melee));
+                return Some((
+                    loot_cursor(loot_cfg.auto_loot, shift),
+                    !(can_auto_interact || in_melee),
+                ));
             }
             // Skin also needs the learn latch `[0xb700e4 + 4×isPlayerTarget]` (`0x482589`): a
             // player who has learned no Skinning spell sees Point.
@@ -666,6 +679,7 @@ pub(super) fn classify_cursor(
             skin_latch: learned.skin_player_corpse.is_some(),
             dist_sq: corpse_tf.translation.distance_squared(self_tf.translation),
             looting_this: loot_latch.0.is_some() && loot_latch.0 == hovered.corpse_guid,
+            can_auto_interact,
             auto_loot: loot_cfg.auto_loot,
             shift_held: shift,
         })
@@ -692,6 +706,25 @@ pub(super) fn classify_cursor(
 mod tests {
     use super::*;
     use benilla_protocol::messages::dialog_status;
+
+    /// `CanLootNow 0x5ec110` skips its range under `CanAutoInteract` (`0x5ec11b`), so the click
+    /// that walks there finds a lit pouch.
+    #[test]
+    fn click_to_move_lights_a_far_corpses_pouch() {
+        let far = CorpseFacts {
+            lootable: true,
+            dist_sq: 400.0,
+            ..CorpseFacts::default()
+        };
+        assert_eq!(corpse_cursor(far), Some((CursorKind::Pickup, true)));
+        assert_eq!(
+            corpse_cursor(CorpseFacts {
+                can_auto_interact: true,
+                ..far
+            }),
+            Some((CursorKind::Pickup, false))
+        );
+    }
 
     #[test]
     fn the_corpse_classifier_has_two_legs_and_no_own_corpse_leg() {

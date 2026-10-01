@@ -438,7 +438,7 @@
             Controls = {
                 "RowStickyTarget", "RowAssistAttack", "RowClearAFK",
                 "RowBlockTrades", "RowAutoSelfCast",
-                "RowAutoLoot", "RowInvertMouse", "RowMouseSpeed",
+                "RowAutoLoot", "RowInvertMouse", "RowMouseSpeed", "RowClickToMove",
                 "RowCameraFollowStyle", "RowFollowTerrain", "RowHeadBob",
                 "RowAutoFollowSpeed", "RowWaterCollision", "RowSmartPivot",
                 "RowMouseLookSpeed", "RowMaxCameraDistance",
@@ -1614,12 +1614,21 @@
                                                 BenillaOptionsSliderRow_Setup(this, 0.5, 1.5, 0.05)
                                             </OnLoad></Scripts>
                                         </Frame>
+                                        <!-- 1.12's box sits under the mouse slider. -->
+                                        <Frame name="$parentRowClickToMove" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMouseSpeed" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowMouseSpeed" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>BenillaOptionsRow_OnLoad(this, "autointeract", "Click-to-Move",
+                                                "OPTION_TOOLTIP_CLICK_TO_MOVE")</OnLoad></Scripts>
+                                        </Frame>
                                         <!-- Smart 1, Always 2, Never 0 (UIOptionsFrame.lua:525,
                                              536, 547). -->
                                         <Frame name="$parentRowCameraFollowStyle" inherits="BenillaOptionsDropdownRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMouseSpeed" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowMouseSpeed" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowClickToMove" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowClickToMove" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "cameraSmoothStyle",

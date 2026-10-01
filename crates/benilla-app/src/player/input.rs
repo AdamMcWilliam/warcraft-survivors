@@ -41,9 +41,9 @@ pub(super) fn look_input(
             rig.world_mouse.held(LookButton::Left) || steer_held,
             bit::LEFT_MOUSE,
         );
-        // `/follow` sets the forward bit through W's own setter, so it arms the camera like W.
+        // The auto-move sets the forward bit through W's own setter, so it arms the camera like W.
         set(
-            binds.pressed(crate::bindings::Input::MoveForward) || player.follow_forward,
+            binds.pressed(crate::bindings::Input::MoveForward) || player.auto_forward,
             bit::FORWARD,
         );
         set(
@@ -153,10 +153,11 @@ pub(super) fn move_axes(
     // ── The forward/back axis ── The order of S and autorun decides: S held, then autorun
     // toggled, keeps both (the toggle pushes `0x1000`, so `test cl,0x30` misses) and the
     // reference sends MSG_MOVE_STOP with S held; autorun, then S, clears the bit at key-down and
-    // walks you backward. `/follow` is a held forward, W's own bit `0x100000` through W's setter,
-    // so it nets against S like W and never trips the cancel set, which fires on key-down edges.
+    // walks you backward. The auto-move is a held forward, W's own bit `0x100000` through W's
+    // setter, so it nets against S like W and never trips the cancel set, which fires on key-down
+    // edges.
     let fwd_axis = state::forward_axis(
-        binds.pressed(crate::bindings::Input::MoveForward) || player.follow_forward,
+        binds.pressed(crate::bindings::Input::MoveForward) || player.auto_forward,
         binds.pressed(crate::bindings::Input::MoveBackward),
         both_buttons,
         autorun,

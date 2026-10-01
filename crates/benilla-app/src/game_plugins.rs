@@ -675,12 +675,18 @@ pub(crate) mod schedule_tests {
     ///   release, `transport::compose_riders` and `ground_deck_riders`): the readers take the
     ///   movement flags of the caster (`Player::move_flags`) and its target
     ///   (`RemoteMotion::flags`), and those writers touch `login_pitch`, the settle fields and a
-    ///   rider's pose, never the flags.
+    ///   rider's pose, never the flags;
+    /// - Click to Move's steer and arrival (`player::approach::steer_approach`,
+    ///   `target::click::act_on_arrival`) against what `steer_follow` and `act_on_right_click`
+    ///   already pair with: the steer is chained after follow's and writes the same `Player`
+    ///   fields, the arrival runs the click's dispatchers, and their `Transform` reads are the
+    ///   disjoint-lane kind. The dispatchers also carry the walk's start (`Player`,
+    ///   `FollowState`, `Approach`, the stand request), which only a click or an arrival writes.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
     /// that commutes by construction belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 4_860;
+    const UPDATE_ACTIONABLE_CEILING: usize = 4_930;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

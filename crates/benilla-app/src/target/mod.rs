@@ -326,7 +326,8 @@ impl Plugin for TargetPlugin {
                     // order is free.
                     crate::spell::targeting::commit_ground_cast_on_click,
                     crate::spell::targeting::commit_object_cast_on_click,
-                    click::act_on_right_click,
+                    // The verb a walk owes runs at its stop, ahead of this frame's click.
+                    (click::act_on_arrival, click::act_on_right_click).chain(),
                     // The loot close's guid-scoped deselect.
                     click::clear_target_requests,
                     // The script calls that touch the selection, the cast or the targeting cursor
