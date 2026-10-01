@@ -1,4 +1,4 @@
-//! EditBox mouse and clipboard interaction: click, drag-select, copy, cut and the caret blink.
+//! EditBox mouse and clipboard interaction: click, drag-select, copy and cut.
 
 use mlua::Lua;
 
@@ -33,13 +33,17 @@ fn index_at_screen_pos(lua: &Lua, h: FrameHandle, x: f32, y: f32) -> usize {
     .unwrap_or(0)
 }
 
-/// A LeftButton press on EditBox `id` (`0x77b800`) places the cursor at the clicked char,
-/// collapsing the selection, starts a drag and takes focus unconditionally; no shift+click branch.
+/// A LeftButton press on EditBox `id` (`0x77b800`) flushes the box first (`0x77b819`), then
+/// places the cursor at the clicked char, collapsing the selection, starts a drag and takes focus
+/// unconditionally; no shift+click branch.
 pub(in crate::script) fn click(lua: &Lua, id: u32, x: f32, y: f32) {
     let Some(h) = editbox_of(lua, id) else { return };
+    super::flush::flush(lua, h);
     let idx = index_at_screen_pos(lua, h, x, y);
     with_eb(lua, h, |eb| {
         eb.move_caret_to(idx, false);
+        // The setter raises bit 2 whether or not the caret moved (`0x77b868` → `0x77e380`).
+        eb.dirty |= crate::widget::EditBoxState::DIRTY_CURSOR;
         eb.drag_active = true;
     });
     set_focus_handle(lua, h);
@@ -85,24 +89,7 @@ pub(in crate::script) fn cut_selection(lua: &Lua) -> Option<String> {
     let h = focused(lua)?;
     let copied = with_eb(lua, h, |eb| eb.cut_selection()).flatten()?;
     sync_text_region(lua, h);
-    super::mark_text_changed(lua, h);
     Some(copied)
-}
-
-/// The caret blink (`0x77a790`), each frame: past the period (0.5 s by default) the focused box's
-/// caret toggles and the accumulator resets; a non-positive period keeps the caret solid.
-pub(in crate::script) fn tick_blink(lua: &Lua, dt: f32) {
-    if let Some(h) = focused(lua) {
-        with_eb(lua, h, |eb| {
-            if eb.blink_period > 0.0 {
-                eb.blink_accum += dt;
-                if eb.blink_accum > eb.blink_period {
-                    eb.caret_shown = !eb.caret_shown;
-                    eb.blink_accum = 0.0;
-                }
-            }
-        });
-    }
 }
 
 fn focused(lua: &Lua) -> Option<FrameHandle> {
