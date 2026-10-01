@@ -9,6 +9,7 @@
 
 use mlua::{Lua, MultiValue, Value};
 
+use super::binding_abi::number_arg;
 use super::container::UiCursorMode;
 use super::cursor::CursorPayload;
 use super::Model;
@@ -33,8 +34,8 @@ pub struct MerchantItem {
     /// `GetMerchantItemLink`'s answer; `None` while in flight and on a buyback row, as 1.12 has no
     /// `GetBuybackItemLink` and the buyback click takes no modifier (`MerchantFrame.lua:358-361`).
     pub link: Option<String>,
-    /// `GetMerchantItemMaxStack`: the template's `stackable`, 1 if it does not stack; `None` while
-    /// in flight.
+    /// The template's `stackable`, `GetMerchantItemMaxStack`'s answer for a row sold singly;
+    /// `None` while in flight and on a buyback row.
     pub max_stack: Option<u32>,
 }
 
@@ -241,19 +242,24 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetMerchantItemMaxStack(index): nil while in flight or out of range. A right shift-click, or
-    // a left one with the chat box closed, asks it and opens the stack-split spinner only above 1
-    // (`MerchantFrame.lua:313`, `:340`).
+    // GetMerchantItemMaxStack(index) (`0x4fb670`): the template's stack size, or 1 for a row sold
+    // in bundles (`[row+0x18] > 1`) and for every miss: out of range, no vendor, a template in
+    // flight (`0x4fb739`). A right shift-click, or a left one with the chat box closed, asks it and
+    // opens the stack-split spinner only above 1 (`MerchantFrame.lua:313`, `:340`).
     g.set(
         "GetMerchantItemMaxStack",
-        lua.create_function(|lua, index: usize| {
+        lua.create_function(|lua, index: Value| {
+            let index = number_arg(lua, index, "Usage: GetMerchantItemMaxStack(index)")?;
             let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(model
-                .merchant
-                .as_ref()
-                .and_then(|m| index.checked_sub(1).and_then(|n| m.items.get(n)))
+            // Signed, as 1.12.1 reads both.
+            let max_stack = usize::try_from(index)
+                .ok()
+                .and_then(|i| i.checked_sub(1))
+                .and_then(|n| model.merchant.as_ref()?.items.get(n))
+                .filter(|it| it.quantity as i32 <= 1)
                 .and_then(|it| it.max_stack)
-                .map_or(Value::Nil, |n| Value::Integer(i64::from(n))))
+                .map_or(1, |n| n as i32);
+            Ok(i64::from(max_stack))
         })?,
     )?;
 
@@ -533,7 +539,7 @@ mod tests {
                     name: Some("Refreshing Spring Water".into()),
                     texture: Some("Interface\\Icons\\INV_Drink_18".into()),
                     price: 25,
-                    quantity: 1,
+                    quantity: 5,
                     num_available: -1, // unlimited
                     item_id: 159,
                     stats: Some(ItemStatsHead {
@@ -575,7 +581,7 @@ mod tests {
             .unwrap();
         assert_eq!(name, "Refreshing Spring Water");
         assert_eq!(texture, "Interface\\Icons\\INV_Drink_18");
-        assert_eq!((price, quantity, num), (25, 1, -1));
+        assert_eq!((price, quantity, num), (25, 5, -1));
         assert_eq!(usable, 1);
 
         // In flight: name and texture nil, and usable (the null-record skip).
@@ -602,17 +608,52 @@ mod tests {
         assert!(s
             .eval::<bool>("return GetMerchantItemLink(9) == nil")
             .unwrap());
+    }
 
-        assert_eq!(
-            s.eval::<i64>("return GetMerchantItemMaxStack(1)").unwrap(),
-            20
-        );
-        assert!(s
-            .eval::<bool>("return GetMerchantItemMaxStack(2) == nil")
-            .unwrap());
-        assert!(s
-            .eval::<bool>("return GetMerchantItemMaxStack(9) == nil")
-            .unwrap());
+    #[test]
+    fn merchant_max_stack_is_one_for_bundles_and_misses() {
+        let mut s = UiScript::new().unwrap();
+        let max = |s: &mut UiScript, arg: &str| {
+            s.eval::<i64>(&format!("return GetMerchantItemMaxStack({arg})"))
+                .unwrap()
+        };
+        assert_eq!(max(&mut s, "1"), 1, "no vendor open");
+
+        let mut state = stock();
+        let single = |quantity: u32, max_stack: u32| MerchantItem {
+            name: Some("Flask of Oil".into()),
+            price: 100,
+            quantity,
+            num_available: -1,
+            item_id: 814,
+            max_stack: Some(max_stack),
+            ..Default::default()
+        };
+        state.items.push(single(1, 20));
+        state.items.push(single(1, 0));
+        state.items.push(single(0x8000_0000, u32::MAX));
+        s.set_merchant(Some(state));
+
+        assert_eq!(max(&mut s, "1"), 1, "a bundle row takes no split");
+        assert_eq!(max(&mut s, "2"), 1, "a template in flight");
+        assert_eq!(max(&mut s, "3"), 20, "a single row answers its stack size");
+        assert_eq!(max(&mut s, "4"), 0, "the stack size is not floored");
+        assert_eq!(max(&mut s, "5"), -1, "both fields read signed");
+        for out_of_range in ["0", "-1", "6", "9"] {
+            assert_eq!(max(&mut s, out_of_range), 1, "index {out_of_range}");
+        }
+        assert_eq!(max(&mut s, "\"3\""), 20);
+        assert_eq!(max(&mut s, "3.9"), 20);
+        for bad in ["", "nil", "\"x\"", "{}"] {
+            let err = s
+                .eval::<i64>(&format!("return GetMerchantItemMaxStack({bad})"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("Usage: GetMerchantItemMaxStack(index)"),
+                "{bad:?}: {err}"
+            );
+        }
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! The stock merchant window (`MerchantFrame.xml`), engine-only, fed a synthetic stock and purse.
 
 use benilla_ui::script::{
-    ContainerState, DressUpIntent, ExtractedQuad, ItemStatsHead, MerchantItem, MerchantState,
-    QuadContent, ScriptValue, SoundRequest, UiScript,
+    ContainerState, CursorPayload, DressUpIntent, ExtractedQuad, ItemStatsHead, MerchantItem,
+    MerchantState, QuadContent, ScriptValue, SoundRequest, UiScript,
 };
 
 use super::test_ui::{bag_open, load_ui as load_xml, BAG_UI};
@@ -1189,6 +1189,91 @@ fn ctrl_and_shift_on_a_vendor_row_preview_and_post_without_buying() {
     assert!(
         s.take_merchant_buys().is_empty(),
         "a ctrl-click must not also buy"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+#[test]
+fn shift_click_takes_one_bundle_and_splits_a_single() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for f in crate::ui_script::test_ui::production_order(&[
+        super::test_ui::MERCHANT_UI,
+        &[
+            "Interface\\FrameXML\\UIMenu.xml",
+            "Interface\\FrameXML\\UIDropDownMenu.xml",
+            "Interface\\FrameXML\\ChatFrame.xml",
+            "Interface\\FrameXML\\FloatingChatFrame.xml",
+            "Interface\\FrameXML\\StackSplitFrame.xml",
+            "Interface\\FrameXML\\MerchantFrame.xml",
+        ],
+    ]) {
+        load_xml(&s, f);
+    }
+    s.set_money(10_000);
+    s.set_merchant(Some(MerchantState {
+        items: vec![
+            MerchantItem {
+                name: Some("Refreshing Spring Water".into()),
+                price: 25,
+                quantity: 5,
+                num_available: -1,
+                item_id: 159,
+                max_stack: Some(20),
+                ..Default::default()
+            },
+            MerchantItem {
+                name: Some("Flask of Oil".into()),
+                price: 100,
+                quantity: 1,
+                num_available: -1,
+                item_id: 814,
+                max_stack: Some(20),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }));
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    let shift_click = |s: &mut UiScript, row: u32, button: &str| {
+        let (x, y) = super::test_ui::centre_of(s, &format!("MerchantItem{row}ItemButton"));
+        s.set_modifiers(true, false, false);
+        s.mouse_button(x, y, button, true);
+        s.mouse_button(x, y, button, false);
+        s.set_modifiers(false, false, false);
+    };
+    let split_shown = |s: &UiScript| s.eval::<bool>("return StackSplitFrame:IsShown()").unwrap();
+
+    shift_click(&mut s, 1, "LeftButton");
+    assert!(!split_shown(&s), "a bundle row opens no split");
+    assert!(
+        matches!(s.cursor_payload(), Some(CursorPayload::Merchant(m)) if m.item_id == 159),
+        "the left arm picks one bundle up: {:?}",
+        s.cursor_payload()
+    );
+    s.run("ClearCursor()").unwrap();
+
+    shift_click(&mut s, 1, "RightButton");
+    assert!(!split_shown(&s), "a bundle row opens no split");
+    assert_eq!(
+        s.take_merchant_buys(),
+        vec![(1, 1)],
+        "the right arm buys one bundle"
+    );
+
+    shift_click(&mut s, 2, "RightButton");
+    assert!(split_shown(&s), "a single row opens the split");
+    assert_eq!(
+        s.eval::<i64>("return StackSplitFrame.maxStack").unwrap(),
+        20,
+        "the split spans the stack size, under what the purse affords"
+    );
+    assert!(
+        s.take_merchant_buys().is_empty(),
+        "the split buys nothing until it is chosen"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

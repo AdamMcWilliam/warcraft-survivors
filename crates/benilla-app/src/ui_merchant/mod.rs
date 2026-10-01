@@ -204,7 +204,7 @@ fn resolve_item(
         item_id: item.entry,
         stats,
         link,
-        max_stack: template.map(|t| t.stackable.max(1)),
+        max_stack: template.map(|t| t.stackable),
     }
 }
 
