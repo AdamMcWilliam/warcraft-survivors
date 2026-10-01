@@ -75,6 +75,7 @@ pub(crate) use by_name::{AssistRequest, TargetByNameRequest};
 pub(crate) use ring::{duel_rung, ring_reaction, ring_variant, Factions, RingVariant};
 
 pub(crate) use click::DeselectGuid;
+pub use click::Interact;
 
 /// Our target, set the instant we click, as the 1.12 client does without waiting for the server,
 /// and cleared on deselect or when it streams out. `CMSG_SET_SELECTION` carries the guid, which the
@@ -286,6 +287,7 @@ impl Plugin for TargetPlugin {
             .add_message::<TargetByNameRequest>()
             .add_message::<AssistRequest>()
             .add_message::<click::DeselectGuid>()
+            .add_message::<Interact>()
             .add_systems(
                 Startup,
                 (
@@ -327,7 +329,12 @@ impl Plugin for TargetPlugin {
                     crate::spell::targeting::commit_ground_cast_on_click,
                     crate::spell::targeting::commit_object_cast_on_click,
                     // The verb a walk owes runs at its stop, ahead of this frame's click.
-                    (click::act_on_arrival, click::act_on_right_click).chain(),
+                    (
+                        click::act_on_arrival,
+                        click::act_on_right_click,
+                        click::act_on_interact,
+                    )
+                        .chain(),
                     // The loot close's guid-scoped deselect.
                     click::clear_target_requests,
                     // The script calls that touch the selection, the cast or the targeting cursor

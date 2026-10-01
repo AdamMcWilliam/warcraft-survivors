@@ -418,28 +418,42 @@ pub(crate) struct LoginAbandon(pub(crate) std::sync::Arc<std::sync::atomic::Atom
 #[derive(Resource, Default)]
 pub(crate) struct GuidIndex(pub(crate) HashMap<u64, Entity>);
 
-/// The object manager's guid lookup (`ClntObjMgrObjectPtr 0x468460`): a guid to its descriptor
-/// store, whatever the kind, and an item's countdown cells. Read-only.
+/// The streamed objects, whatever the kind, with their descriptor stores, our own player, and an
+/// item's countdown cells. Read-only. The by-guid lookups are `ClntObjMgrObjectPtr` (`0x468460`).
 #[derive(SystemParam)]
-pub(crate) struct Objects<'w, 's> {
+pub struct Objects<'w, 's> {
     index: Res<'w, GuidIndex>,
     stores: Query<'w, 's, &'static ObjectStore>,
     countdowns: Query<'w, 's, &'static crate::items::Countdowns>,
+    me: Query<'w, 's, Entity, With<SelfPlayer>>,
 }
 
 impl Objects<'_, '_> {
-    /// The entity behind a guid, if streamed.
-    pub(crate) fn entity(&self, guid: u64) -> Option<Entity> {
+    /// The entity behind a guid, if streamed (`ClntObjMgrObjectPtr`, `0x468460`).
+    pub fn entity(&self, guid: u64) -> Option<Entity> {
         self.index.0.get(&guid).copied()
     }
 
-    /// A streamed object's merged descriptor fields.
-    pub(crate) fn object(&self, guid: u64) -> Option<&ObjectFields> {
+    /// A streamed object's merged descriptor fields, found as `0x468460` does, by guid.
+    pub fn object(&self, guid: u64) -> Option<&ObjectFields> {
         self.index
             .0
             .get(&guid)
             .and_then(|&e| self.stores.get(e).ok())
             .map(|s| &s.0)
+    }
+
+    /// Every streamed object, items included.
+    pub fn iter(&self) -> impl Iterator<Item = (u64, Entity, &ObjectFields)> + '_ {
+        self.index
+            .0
+            .iter()
+            .filter_map(|(&guid, &e)| Some((guid, e, &self.stores.get(e).ok()?.0)))
+    }
+
+    /// Our own player, once in the world.
+    pub fn player(&self) -> Option<Entity> {
+        self.me.single().ok()
     }
 
     /// An item object's countdown cells.
@@ -2452,5 +2466,38 @@ mod tests {
                 "{refused:#04x} is a lane the client never sends addon data on"
             );
         }
+    }
+
+    #[test]
+    fn objects_lists_every_streamed_object_and_names_our_own() {
+        use bevy::ecs::system::RunSystemOnce;
+        const ME: u64 = 0x5E1F;
+        const BOAR: u64 = 0xF130_0000_0000_0042;
+        let mut world = World::new();
+        world.init_resource::<GuidIndex>();
+        let fields = |health| {
+            ObjectStore(ObjectFields::from_pairs(&[(
+                benilla_protocol::field::FIELD_UNIT_HEALTH,
+                health,
+            )]))
+        };
+        let me = world.spawn((SelfPlayer, Guid(ME), fields(256))).id();
+        let boar = world.spawn((Guid(BOAR), fields(40))).id();
+        world
+            .resource_mut::<GuidIndex>()
+            .0
+            .extend([(ME, me), (BOAR, boar)]);
+        let (listed, player) = world
+            .run_system_once(|objects: Objects| {
+                let mut listed: Vec<_> = objects
+                    .iter()
+                    .map(|(guid, e, f)| (guid, e, f.unit_health()))
+                    .collect();
+                listed.sort_by_key(|&(guid, ..)| guid);
+                (listed, objects.player())
+            })
+            .unwrap();
+        assert_eq!(listed, [(ME, me, Some(256)), (BOAR, boar, Some(40))]);
+        assert_eq!(player, Some(me));
     }
 }

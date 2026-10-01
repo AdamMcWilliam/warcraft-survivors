@@ -520,38 +520,79 @@ fn corpse_cursor(f: CorpseFacts) -> Option<(CursorKind, bool)> {
     None // the reference's "else clear": Point
 }
 
-/// Resolve this frame's [`WorldCursor`]; no hover, or nothing resolvable, reads Point.
-#[allow(clippy::type_complexity)]
+/// Resolve this frame's [`WorldCursor`] over the hover.
 pub(super) fn classify_cursor(
     hovered: Res<Hovered>,
     hovered_object: Res<HoveredObject>,
-    factions: Option<Res<Factions>>,
-    reputations: Res<Reputations>,
+    inputs: CursorInputs,
     (mut cursor, mut fork): (ResMut<WorldCursor>, ResMut<AttackFork>),
-    // `control_lost` is the attack leg's `[0xb4b3e4]` clear.
-    (player, approach): (Res<crate::player::Player>, Res<crate::player::Approach>),
-    units: Query<(
-        &Transform,
-        Option<&ObjectStore>,
-        Option<&crate::go_anim::GoAnim>,
-    )>,
-    self_q: Query<(&Transform, &ObjectStore), With<SelfPlayer>>,
-    go_inputs: super::lock::GoLockInputs,
-    player_actions: Res<crate::ui_action::PlayerActions>,
-    // `[0xb700e4]` and `[0xb700e8]`, the skin legs' learned-spell latches.
-    learned: Res<crate::ui_action::LearnedAbilities>,
-    quest: Res<crate::ui_quest::QuestGiver>,
-    loot_cfg: Res<crate::ui_loot::LootConfig>,
-    keys: Res<ButtonInput<KeyCode>>,
-    // `[player+0x1d28/2c]`, the object whose loot window is open.
-    loot_latch: Res<crate::ui_loot::LootLatch>,
-    // `[0xb72038]`, the queued area; absent in a headless build, which reads as not queued.
-    stone: Option<Res<crate::ui_dialog_verbs::MeetingStone>>,
 ) {
+    let (want, want_fork) = classify(&inputs, &hovered, &hovered_object);
+    if *cursor != want {
+        *cursor = want;
+    }
+    if *fork != want_fork {
+        *fork = want_fork;
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct CursorInputs<'w, 's> {
+    factions: Option<Res<'w, Factions>>,
+    reputations: Res<'w, Reputations>,
+    // `control_lost` is the attack leg's `[0xb4b3e4]` clear.
+    player: Res<'w, crate::player::Player>,
+    approach: Res<'w, crate::player::Approach>,
+    #[allow(clippy::type_complexity)]
+    units: Query<
+        'w,
+        's,
+        (
+            &'static Transform,
+            Option<&'static ObjectStore>,
+            Option<&'static crate::go_anim::GoAnim>,
+        ),
+    >,
+    self_q: Query<'w, 's, (&'static Transform, &'static ObjectStore), With<SelfPlayer>>,
+    go_inputs: super::lock::GoLockInputs<'w, 's>,
+    player_actions: Res<'w, crate::ui_action::PlayerActions>,
+    // `[0xb700e4]` and `[0xb700e8]`, the skin legs' learned-spell latches.
+    learned: Res<'w, crate::ui_action::LearnedAbilities>,
+    quest: Res<'w, crate::ui_quest::QuestGiver>,
+    loot_cfg: Res<'w, crate::ui_loot::LootConfig>,
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    // `[player+0x1d28/2c]`, the object whose loot window is open.
+    loot_latch: Res<'w, crate::ui_loot::LootLatch>,
+    // `[0xb72038]`, the queued area; absent in a headless build, which reads as not queued.
+    stone: Option<Res<'w, crate::ui_dialog_verbs::MeetingStone>>,
+}
+
+/// The cursor and the attack fork over a pick; no pick, or nothing resolvable, reads Point.
+pub(super) fn classify(
+    inputs: &CursorInputs,
+    hovered: &Hovered,
+    hovered_object: &HoveredObject,
+) -> (WorldCursor, AttackFork) {
+    let CursorInputs {
+        factions,
+        reputations,
+        player,
+        approach,
+        units,
+        self_q,
+        go_inputs,
+        player_actions,
+        learned,
+        quest,
+        loot_cfg,
+        keys,
+        loot_latch,
+        stone,
+    } = inputs;
     let can_auto_interact = crate::player::can_auto_interact(
         approach.enabled,
         self_q.single().ok().map(|(_, s)| s),
-        &player,
+        player,
     );
     // A GameObject that is not highlightable clears the cursor, as the reference's handler does.
     let resolve_go = || {
@@ -644,7 +685,7 @@ pub(super) fn classify_cursor(
         if super::can_interact(
             Some(store),
             factions.as_deref(),
-            &reputations,
+            reputations,
             Some(self_store),
         ) {
             let status = hovered.guid.and_then(|g| quest.status(g));
@@ -658,7 +699,7 @@ pub(super) fn classify_cursor(
         if !super::can_attack(
             Some(store),
             factions.as_deref(),
-            &reputations,
+            reputations,
             Some(self_store),
         ) {
             return None;
@@ -684,7 +725,7 @@ pub(super) fn classify_cursor(
             shift_held: shift,
         })
     };
-    let resolved = if go_is_nearest(&hovered, &hovered_object) {
+    let resolved = if go_is_nearest(hovered, hovered_object) {
         resolve_go()
     } else if hovered.corpse.is_some() {
         resolve_corpse()
@@ -692,14 +733,7 @@ pub(super) fn classify_cursor(
         resolve_unit()
     };
     let (kind, unable) = resolved.unwrap_or((CursorKind::Point, false));
-    let want = WorldCursor { kind, unable };
-    if *cursor != want {
-        *cursor = want;
-    }
-    let want_fork = AttackFork(attack_fork.get());
-    if *fork != want_fork {
-        *fork = want_fork;
-    }
+    (WorldCursor { kind, unable }, AttackFork(attack_fork.get()))
 }
 
 #[cfg(test)]
