@@ -1,7 +1,10 @@
 //! The stock GM help window (`HelpFrame.xml`): the two faces of `UPDATE_TICKET`, the ticket
 //! toast and its repoll, and the status ask on show.
 
-use benilla_ui::script::{GmTicketIntent, ScriptValue, UiScript};
+use benilla_ui::script::{
+    EditAction, EditBoxAdvanceRequest, EditUnit, GmTicketIntent, MeasureRequest, ScriptValue,
+    TextMeasure, UiScript,
+};
 
 use super::test_ui::load_ui as load_xml;
 
@@ -234,6 +237,65 @@ fn the_ticket_text_grows_with_its_lines_and_its_scroll_frame_ranges_over_them() 
         .unwrap(),
         height - 378.0,
         "the range reached the scroll bar through OnScrollRangeChanged"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A stand-in font engine: each byte 7 wide, each line 14 tall, a multi-line box's rows starting
+/// after each newline, a trailing one opening an empty row as the reference's break routine does
+/// (`0x5c250b`–`0x5c2522`); the texts here never wrap.
+struct Rows;
+
+impl TextMeasure for Rows {
+    fn measure(&mut self, req: &MeasureRequest) -> (f32, f32, f32) {
+        let natural = req.text.split('\n').map(str::len).max().unwrap_or(0) as f32 * 7.0;
+        (natural, req.text.split('\n').count() as f32 * 14.0, natural)
+    }
+
+    fn editbox_advances(
+        &mut self,
+        req: &EditBoxAdvanceRequest,
+    ) -> Option<(Vec<f32>, Vec<usize>, f32)> {
+        let cum = (0..=req.text.len()).map(|i| i as f32 * 7.0).collect();
+        if req.wrap_width.is_none() {
+            return Some((cum, vec![0], 0.0));
+        }
+        let breaks = req.text.match_indices('\n').map(|(i, _)| i + 1);
+        let rows = std::iter::once(0).chain(breaks).collect();
+        Some((cum, rows, 14.0))
+    }
+}
+
+/// The ticket text is multi-line: UP moves the caret a row at its letter column (`0x77cb20`), and
+/// Shift+HOME selects back to the line's start (`0x77c980`), not the ticket's.
+#[test]
+fn the_ticket_texts_caret_moves_by_rows_and_lines() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = setup();
+    s.set_text_measurer(Box::new(Rows));
+    s.run("ShowUIPanel(HelpFrame) HelpFrame_ShowFrame(\"OpenTicket\")")
+        .unwrap();
+    s.resolve();
+    s.run(
+        "HelpFrameOpenTicketText:SetText('Stuck in\\nthe mine') \
+         HelpFrameOpenTicketText:SetFocus()",
+    )
+    .unwrap();
+    s.tick(0.016);
+    s.resolve();
+    let mv = |s: &mut UiScript, unit, back, extend| {
+        assert!(s.editbox_action(EditAction::Move { unit, back, extend }));
+    };
+    // From the end, column 8: the end of "Stuck in".
+    mv(&mut s, EditUnit::Row, true, false);
+    s.char_input(",");
+    mv(&mut s, EditUnit::Edge, false, false);
+    mv(&mut s, EditUnit::Line, true, true);
+    s.char_input("a cave");
+    assert_eq!(
+        s.eval::<String>("return HelpFrameOpenTicketText:GetText()")
+            .unwrap(),
+        "Stuck in,\na cave"
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
