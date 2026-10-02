@@ -424,6 +424,10 @@ pub(crate) struct EmoteAnim {
     pub(crate) anim_id: u16,
     /// `PlaySeq` stamp; a kit anim inherits its `CastEvent`'s.
     pub(crate) seq: u64,
+    /// Came through the shared one-shot emote player (`0x5fcd20`: `SMSG_EMOTE`, the gesture
+    /// dispatcher), which skips an id already armed on the key bone or bone 0 (`0x5fcd56`). A kit
+    /// anim and `DoEmote`'s local play call `0x5fe2f0` directly and take no such test.
+    pub(crate) via_player: bool,
 }
 
 /// A state kit's `AnimID`, compared and never played: both field-4 callers (`0x5ff4c6`,
@@ -465,6 +469,7 @@ fn flourish_to_anim(
             entity: child.0,
             anim_id: select::MOUNT_SPECIAL,
             seq: play_seq.next(),
+            via_player: false,
         });
     }
 }
@@ -511,6 +516,7 @@ mod emote_anim;
 /// The client-local gestures (chat, NPC interact), the reference's `0x60bb30`.
 mod gesture;
 use emote_anim::emote_to_anim;
+pub(crate) use emote_anim::{local_play_eligible, LocalPlay};
 pub(crate) use gesture::{select_gesture, Gesture, GestureQueue};
 
 /// The Bevy systems that execute the state machine `select` picks.
@@ -845,6 +851,8 @@ impl Plugin for CreatureAnimPlugin {
                     // Same frame as the loot kneel: the reference force-plays Loot 50 in the
                     // handler that arms the latch.
                     .after(crate::ui_loot::resolve_loot_kneel)
+                    // `DoEmote`'s local play, written in the chat drain.
+                    .after(crate::ui_chat::ChatDrain)
                     // After Input so a sheath request (the Z toggle) executes the same frame.
                     .after(WorldStage::Input)
                     // `VisualSheath` must land before `resolve_equipment` reads it, or a sheath

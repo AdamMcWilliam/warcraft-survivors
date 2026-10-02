@@ -114,7 +114,7 @@ pub(super) fn drive_gestures(
         };
         let (store, movement, remote, engaged) =
             units.get(entity).unwrap_or((None, None, None, false));
-        if !super::emote_anim::play_eligible(store, movement, remote, engaged) {
+        if !super::emote_anim::play_eligible(store, movement, remote, engaged, anim_id) {
             debug!("gesture: {gesture:?} suppressed for {entity:?}");
             continue;
         }
@@ -122,6 +122,7 @@ pub(super) fn drive_gestures(
             entity,
             anim_id: anim_id as u16,
             seq: play_seq.next(),
+            via_player: true,
         });
     }
 }
