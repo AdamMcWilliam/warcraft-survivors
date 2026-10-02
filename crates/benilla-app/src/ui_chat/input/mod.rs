@@ -29,12 +29,27 @@ fn target_player_name(
     names.resolve(guid, commands).map(str::to_string)
 }
 
-/// The target guid a `CMSG_TEXT_EMOTE` carries: the selection, except that an emote at yourself
-/// goes out untargeted (`0x5ef611`), so 1.12 has no self-emote sentence. Compared by entity, which
-/// agrees with the guid: [`Selection`]'s one writer sets both from one streamed entity.
-pub(super) fn emote_target(selection: &Selection, me: Option<Entity>) -> u64 {
-    match selection.guid {
-        Some(guid) if !(me.is_some() && selection.target == me) => guid,
+/// The target guid a `CMSG_TEXT_EMOTE` carries (`DoEmote`'s caller, `0x49fdb1`): the selection,
+/// unless the argument is a non-empty word not starting with `%`, which names a player through
+/// `named` (the `0x493aa0` player search) and sends guid 0 on a miss. Either way an emote at
+/// yourself goes out untargeted (`0x5ef611`), so 1.12 has no self-emote sentence. Compared by
+/// entity, which agrees with the guid: [`Selection`]'s one writer sets both from one streamed
+/// entity.
+pub(super) fn emote_target(
+    arg: Option<&str>,
+    selection: &Selection,
+    named: impl FnOnce(&str) -> Option<(Entity, u64)>,
+    me: Option<Entity>,
+) -> u64 {
+    let (entity, guid) = match arg.filter(|a| !a.is_empty() && !a.starts_with('%')) {
+        Some(name) => match named(name) {
+            Some((entity, guid)) => (Some(entity), Some(guid)),
+            None => (None, None),
+        },
+        None => (selection.target, selection.guid),
+    };
+    match guid {
+        Some(guid) if !(me.is_some() && entity == me) => guid,
         _ => 0,
     }
 }
@@ -73,6 +88,8 @@ pub(super) struct ChatOut<'w, 's> {
     target: MessageWriter<'w, crate::target::TargetByNameRequest>,
     assist: MessageWriter<'w, crate::target::AssistRequest>,
     follow: MessageWriter<'w, crate::player::FollowRequest>,
+    /// `/wave <name>`'s player search, which selects nothing.
+    players: crate::target::PlayerLookup<'w, 's>,
     /// `/partytest ping` seats a group member's ping through the wire arm's `seat`.
     ping: ResMut<'w, crate::minimap::MinimapPing>,
     /// The red error line by GlobalStrings key. The system's only `UiErrorKeys` access: a second
@@ -91,7 +108,13 @@ fn engine_verbs(
     for e in script.take_emote_requests() {
         // The token is the `EmotesText.dbc` name (`EMOTE<i>_TOKEN`, "WAVE").
         match emotes.and_then(|c| c.text_id(&e.token)) {
-            Some(id) => out.push((String::new(), ParsedChat::TextEmote(id))),
+            Some(text_id) => out.push((
+                String::new(),
+                ParsedChat::TextEmote {
+                    text_id,
+                    arg: e.target,
+                },
+            )),
             None => warn!(
                 "chat: DoEmote({:?}): no EmotesText row for that token",
                 e.token
@@ -650,22 +673,25 @@ pub(super) fn drain_chat_input(
                 }
             }
             // `DoEmote` (`0x5ef560`): the gates in the client's order, then posture and packet.
-            ParsedChat::TextEmote(text_id) => {
+            ParsedChat::TextEmote { text_id, arg } => {
                 let (stand_state, flags) = self_player
                     .single()
                     .map_or((0, 0), |(_, m, _)| (m.stand_state, m.flags));
                 let swimming = flags & move_flags::SWIMMING != 0;
                 let emote_id = emotes.as_deref().and_then(|e| e.text_emote(text_id));
-                // A chat-only text emote (no Emotes.dbc row) has no flags or posture: it sends.
                 let posture = emote_id.and_then(|id| emotes.as_deref()?.posture_state(id));
-                // Gate A (`CheckEmoteEligible`, `0x47db40`) suppresses the anim and the packet,
-                // except its `0x4000` arm, which refuses out loud.
+                // `DoEmote`'s gates (`0x5ef57e`-`0x5ef5c3`): a possessed unit, then the `Emotes.dbc`
+                // row, then `CheckEmoteEligible` (`0x47db40`); only its `0x4000` arm refuses out
+                // loud. A chat-only text emote (`EmoteID` 0) reads row 0.
+                let self_unit_flags = self_store.single().map_or(0, |s| s.0.unit_flags());
                 let gate = match emotes.as_deref() {
-                    Some(e) => emote_id
-                        .and_then(|id| e.emote_flags(id))
-                        .map_or(EmoteGate::Send, |f| {
-                            emote_send_eligible(f, stand_state, swimming, flags)
-                        }),
+                    Some(e) => emote_gate(
+                        e.emote_flags(emote_id.unwrap_or(0)),
+                        self_unit_flags,
+                        stand_state,
+                        swimming,
+                        flags,
+                    ),
                     None => EmoteGate::Send,
                 };
                 // `DoEmote`'s half of the `0x4000` arm (`0x5ef5d0`): the red line only while
@@ -713,7 +739,9 @@ pub(super) fn drain_chat_input(
                         .write(crate::player::StandStateRequest { state: state as u8 });
                 }
                 let target = emote_target(
+                    arg.as_deref(),
                     &selection,
+                    |name| chat_out.players.find(&names, name),
                     self_player.single().ok().map(|(entity, _, _)| entity),
                 );
                 match commands
@@ -1314,6 +1342,28 @@ pub(super) fn emote_send_eligible(
         return EmoteGate::Moving;
     }
     EmoteGate::Send
+}
+
+/// `UNIT_FLAG_POSSESSED`, `UNIT_FIELD_FLAGS` bit 24: `DoEmote` returns silently for a unit that
+/// has it (`0x5ef57e`, `descriptor+0xa3 & 1`).
+const UNIT_FLAG_POSSESSED: u32 = 0x0100_0000;
+
+/// `DoEmote`'s entry gates (`0x5ef560`) in the client's order: the unit's own `UNIT_FIELD_FLAGS`
+/// (`0x5ef57e`), the `Emotes.dbc` row by `EmoteID` (`0x5ef59c`-`0x5ef5b3`; `None` is a missing
+/// row, which returns), then `CheckEmoteEligible` over the row's flags.
+pub(super) fn emote_gate(
+    row_flags: Option<u32>,
+    unit_flags: u32,
+    stand_state: u8,
+    swimming: bool,
+    move_flags: u32,
+) -> EmoteGate {
+    match row_flags {
+        Some(flags) if unit_flags & UNIT_FLAG_POSSESSED == 0 => {
+            emote_send_eligible(flags, stand_state, swimming, move_flags)
+        }
+        _ => EmoteGate::Suppressed,
+    }
 }
 
 /// `PLAYER_FLAGS_DND` (`0x4`) off our live descriptor. Live, not mirrored, as in the reference
