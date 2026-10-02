@@ -280,13 +280,16 @@ pub(super) fn drive_animations(
         MessageReader<BaseAnimRecompute>,
         // A rider's mount child, where a mount-set request goes (`0x5fe7c1`).
         Query<(&ObjectStore, &crate::entities::mount::MountChild)>,
+        // The open NPC session's unit (`[0xb4e2d0]`): its state emote is passed over when the
+        // row's `EmoteFlags` carry `0x2000` (`0x5fd7e2`-`0x5fd7fd`).
+        Option<Res<crate::ui_session::InteractNpc>>,
     ),
     // The variation roll's LCG, the reference's single CRT `_rand` stream shared by every play.
     mut rng: ResMut<benilla_assets::AnimRng>,
     // The last anim trace line per traced unit; the trace writes only on change.
     mut anim_trace_last: Local<std::collections::HashMap<Entity, String>>,
 ) {
-    let (emote_sounds, loot_kneel, time, names, mut recomputes, riders) = aux;
+    let (emote_sounds, loot_kneel, time, names, mut recomputes, riders, interact) = aux;
     let dt = time.delta_secs();
     // This frame's one-shot plays per unit, replayed in the reference's call order (`PlaySeq`
     // stamps): a later call overwrites an earlier, and the combat fast path keys on what is playing
@@ -935,6 +938,7 @@ pub(super) fn drive_animations(
             {
                 if drv.mode == Mode::Gait {
                     drv.gait = None;
+                    drv.interact_hold = false; // the window's end is a re-pick (`0x5fc45a`)
                 } else {
                     let head = anims
                         .clips
@@ -975,6 +979,34 @@ pub(super) fn drive_animations(
             }
         }
 
+        // `SetInteractNPC` re-picks the base at once on open and on clear (`0x5fd9e0(-1)`, sites
+        // `0x493198` and `0x493219`), over a live one-shot as any base arm; in Gait the per-frame
+        // pick already follows. A player's open and clear skip it (`0x493159`, `0x493203`), a pose
+        // under the one-shot re-picks to its own id and an airborne unit to the freeze
+        // (`0x5fd8e8`), which cut nothing.
+        let target = interact.as_ref().filter(|i| i.0 == Some(entity));
+        let interacting = target.is_some();
+        if let Some(guid) = target.and_then(|i| i.1) {
+            drv.interact_player = benilla_protocol::guid::is_player(guid);
+        }
+        if std::mem::replace(&mut drv.interacting, interacting) != interacting
+            && !drv.interact_player
+        {
+            // Opening re-picks with the NPC named, so it ends a hold; clearing re-picks with it
+            // still named, so the state stays passed over until the next re-pick.
+            drv.interact_hold = !interacting;
+            if matches!(drv.mode, Mode::Swing { under: None, .. }) && !airborne_frozen {
+                drv.deferred = None;
+                drv.mode = Mode::Gait;
+                drv.gait = None;
+            }
+        }
+        if drv.interact_hold
+            && (mv.flags != drv.gait_flags || !matches!(drv.mode, Mode::Gait | Mode::Swing { .. }))
+        {
+            drv.interact_hold = false;
+        }
+
         // ── The mode machine: the base track's decision.
         mode::run(
             mode::Frame {
@@ -994,6 +1026,7 @@ pub(super) fn drive_animations(
                 wielded,
                 store,
                 emote_sounds: emote_sounds.as_deref(),
+                interacting: interacting || drv.interact_hold,
                 walk,
                 model_scale,
                 traced,

@@ -4138,3 +4138,292 @@ mod routing {
         );
     }
 }
+
+/// The `UNIT_NPC_EMOTESTATE` resolver (`0x5fd770`): the current interact NPC passes over a state
+/// whose `Emotes.dbc` flags carry `0x2000`, and `SetInteractNPC` re-picks its base on open and
+/// on clear.
+mod emote_state {
+    use super::*;
+    use crate::creature_anim::Mode;
+    use crate::net::ObjectStore;
+    use crate::sound::EmoteSounds;
+    use crate::ui_session::InteractNpc;
+    use benilla_formats::EmoteSoundCatalog;
+
+    /// Emote states: 28 plays AnimID 234 and yields to interaction (`0x2000`); 29 plays 235 and
+    /// does not.
+    const YIELDING: u32 = 28;
+    const STUBBORN: u32 = 29;
+    /// `/stand`'s state 26 (vmangos `ChatHandler.cpp` `HandleTextEmoteOpcode`): AnimID 0.
+    const STAND_STATE: u32 = 26;
+    const FIELD_NPC_EMOTESTATE: u16 = 148;
+
+    /// Real graph nodes, so loop windows complete: every clip lasts 0.1 s, and the loops are one
+    /// pass per window.
+    fn model(
+        app: &mut App,
+    ) -> (
+        ModelAnimations,
+        bevy::animation::graph::AnimationGraphHandle,
+    ) {
+        use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle};
+        use bevy::animation::AnimationClip;
+        let ids: [(u16, bool); 6] = [
+            (0, true),    // Stand
+            (234, true),  // the yielding state's loop
+            (235, true),  // the other state's loop
+            (118, false), // SpecialUnarmed, a one-shot
+            (41, true),   // SwimIdle
+            (42, true),   // Swim
+        ];
+        let handles: Vec<_> = ids
+            .iter()
+            .map(|_| {
+                let mut c = AnimationClip::default();
+                c.set_duration(0.1);
+                app.world_mut()
+                    .resource_mut::<Assets<AnimationClip>>()
+                    .add(c)
+            })
+            .collect();
+        let (graph, nodes) = AnimationGraph::from_clips(handles);
+        let graph = app
+            .world_mut()
+            .resource_mut::<Assets<AnimationGraph>>()
+            .add(graph);
+        let clips = ids
+            .iter()
+            .zip(nodes)
+            .map(|(&(id, looping), node)| {
+                let mut c = clip(id, 0, looping);
+                c.node = node;
+                c.duration = 0.1;
+                c.blend_time = 0.0;
+                c.frequency = 0x4000;
+                c.replay = (1, 1);
+                c
+            })
+            .collect();
+        (
+            ModelAnimations {
+                graph: graph.clone(),
+                clips,
+                hand_close: [None, None],
+                playable_animation_lookup: Vec::new(),
+                animation_lookup: Vec::new(),
+                global_bones: Vec::new(),
+                first_seq: None,
+                pose: Default::default(),
+            },
+            AnimationGraphHandle(graph),
+        )
+    }
+
+    fn app_with_rows() -> App {
+        let mut app = app();
+        app.init_resource::<InteractNpc>();
+        app.insert_resource(EmoteSounds(
+            EmoteSoundCatalog::default()
+                .with_row(YIELDING, 234, 0x2000)
+                .with_row(STUBBORN, 235, 0)
+                .with_row(STAND_STATE, 0, 0),
+        ));
+        app
+    }
+
+    fn unit(app: &mut App, state: u32) -> Entity {
+        let (model, graph) = model(app);
+        app.world_mut()
+            .spawn((
+                model,
+                graph,
+                AnimationPlayer::default(),
+                AnimationTransitions::new(),
+                AnimDriver::default(),
+                ObjectStore(ObjectFields::from_pairs(&[(FIELD_NPC_EMOTESTATE, state)])),
+            ))
+            .id()
+    }
+
+    fn gait(app: &App, unit: Entity) -> Option<u16> {
+        app.world().entity(unit).get::<AnimDriver>().unwrap().gait
+    }
+
+    /// A creature's guid, which `SetInteractNPC` re-picks for; a player's does not.
+    const CREATURE: u64 = 0xF130_0000_0000_0042;
+    const PLAYER: u64 = 0x42;
+
+    fn interact_guid(app: &mut App, npc: Option<Entity>, guid: u64) {
+        *app.world_mut().resource_mut::<InteractNpc>() = InteractNpc(npc, npc.map(|_| guid));
+        app.update();
+    }
+
+    fn interact(app: &mut App, npc: Option<Entity>) {
+        interact_guid(app, npc, CREATURE);
+    }
+
+    fn mode(app: &App, unit: Entity) -> Mode {
+        app.world().entity(unit).get::<AnimDriver>().unwrap().mode
+    }
+
+    #[test]
+    fn a_yielding_state_stops_while_its_unit_is_the_interact_npc() {
+        let mut app = app_with_rows();
+        let npc = unit(&mut app, YIELDING);
+        app.update();
+        assert_eq!(gait(&app, npc), Some(234), "the work loop plays");
+
+        interact(&mut app, Some(npc));
+        assert_eq!(gait(&app, npc), Some(0), "the window is open: Stand");
+
+        // The clear's re-pick runs with the NPC still named (`0x493219` before the zeroing at
+        // `0x49334b`), so Stand holds until the next re-pick: the end of its window.
+        interact(&mut app, None);
+        for _ in 0..3 {
+            advance(&mut app, 10);
+            assert_eq!(
+                gait(&app, npc),
+                Some(0),
+                "cleared: Stand until its window ends"
+            );
+        }
+        for _ in 0..20 {
+            advance(&mut app, 25);
+        }
+        assert_eq!(gait(&app, npc), Some(234), "then the loop resumes");
+    }
+
+    /// A live one-shot is cut to Stand by the clear, not to the loop.
+    #[test]
+    fn the_clear_cuts_a_one_shot_to_stand() {
+        let mut app = app_with_rows();
+        let npc = unit(&mut app, YIELDING);
+        interact(&mut app, Some(npc));
+        app.world_mut().write_message(EmoteAnim {
+            entity: npc,
+            anim_id: 118,
+            seq: 1,
+        });
+        app.update();
+        assert!(matches!(mode(&app, npc), Mode::Swing { id: 118, .. }));
+        interact(&mut app, None);
+        assert_eq!(mode(&app, npc), Mode::Gait);
+        assert_eq!(gait(&app, npc), Some(0));
+    }
+
+    /// `0x493159` and `0x493203` skip the re-pick for a player (a trade partner).
+    #[test]
+    fn a_player_target_is_not_re_picked() {
+        let mut app = app_with_rows();
+        let partner = unit(&mut app, YIELDING);
+        app.update();
+        app.world_mut().write_message(EmoteAnim {
+            entity: partner,
+            anim_id: 118,
+            seq: 1,
+        });
+        app.update();
+        interact_guid(&mut app, Some(partner), PLAYER);
+        assert!(
+            matches!(mode(&app, partner), Mode::Swing { id: 118, .. }),
+            "open"
+        );
+        interact_guid(&mut app, None, PLAYER);
+        assert!(
+            matches!(mode(&app, partner), Mode::Swing { id: 118, .. }),
+            "clear"
+        );
+    }
+
+    /// The re-pick of a seated unit goes to its pose (`0x5fd550`), so the one-shot over it is
+    /// left to finish and the sit-down entry is not replayed.
+    #[test]
+    fn a_pose_under_the_one_shot_is_not_cut() {
+        use crate::creature_anim::select::Special;
+        let mut app = app_with_rows();
+        let npc = unit(&mut app, YIELDING);
+        app.world_mut().entity_mut(npc).insert(MovementState {
+            stand_state: 1,
+            ..Default::default()
+        });
+        let swing = Mode::Swing {
+            id: 118,
+            under: Some(Special::Pose(1)),
+        };
+        app.world_mut()
+            .entity_mut(npc)
+            .get_mut::<AnimDriver>()
+            .unwrap()
+            .mode = swing;
+        interact(&mut app, Some(npc));
+        assert!(
+            !matches!(mode(&app, npc), Mode::Gait | Mode::Entering(_)),
+            "no forced Gait, so no replay of the entry: {:?}",
+            mode(&app, npc)
+        );
+    }
+
+    #[test]
+    fn a_state_without_the_bit_keeps_playing_while_interacted() {
+        let mut app = app_with_rows();
+        let npc = unit(&mut app, STUBBORN);
+        interact(&mut app, Some(npc));
+        assert_eq!(gait(&app, npc), Some(235));
+    }
+
+    #[test]
+    fn only_the_interact_npc_stops() {
+        let mut app = app_with_rows();
+        let npc = unit(&mut app, YIELDING);
+        let other = unit(&mut app, YIELDING);
+        interact(&mut app, Some(npc));
+        assert_eq!(gait(&app, npc), Some(0));
+        assert_eq!(gait(&app, other), Some(234), "a neighbour keeps working");
+    }
+
+    /// The re-pick overwrites bone 0 like any base arm, so it cuts a live one-shot.
+    #[test]
+    fn opening_the_window_re_picks_over_a_live_one_shot() {
+        let mut app = app_with_rows();
+        let npc = unit(&mut app, YIELDING);
+        app.update();
+        app.world_mut().write_message(EmoteAnim {
+            entity: npc,
+            anim_id: 118,
+            seq: 1,
+        });
+        app.update();
+        assert!(matches!(
+            app.world().entity(npc).get::<AnimDriver>().unwrap().mode,
+            Mode::Swing { id: 118, .. }
+        ));
+
+        interact(&mut app, Some(npc));
+        assert_eq!(gait(&app, npc), Some(0), "the one-shot is cut for Stand");
+    }
+
+    /// State 26 holds Stand over the swim idle until the unit moves (`0x5fd770` before `0x5fd830`).
+    #[test]
+    fn a_set_state_holds_stand_over_the_swim_idle_until_the_unit_moves() {
+        let mut app = app_with_rows();
+        let swimmer = unit(&mut app, STAND_STATE);
+        let bare = unit(&mut app, 0);
+        for u in [swimmer, bare] {
+            app.world_mut().entity_mut(u).insert(MovementState {
+                flags: move_flags::SWIMMING,
+                ..Default::default()
+            });
+        }
+        app.update();
+        assert_eq!(gait(&app, swimmer), Some(0), "state 26 stands in the water");
+        assert_eq!(gait(&app, bare), Some(41), "no state: the swim idle");
+
+        app.world_mut().entity_mut(swimmer).insert(MovementState {
+            speed: 4.7,
+            flags: move_flags::SWIMMING | move_flags::FORWARD,
+            ..Default::default()
+        });
+        app.update();
+        assert_eq!(gait(&app, swimmer), Some(42), "moving, it swims");
+    }
+}
