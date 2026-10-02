@@ -70,6 +70,8 @@ pub(crate) use relations::{
 pub(crate) use scan::{AttackNearestRequest, AttackPick};
 // The chat layer's by-name asks (`/target`, `/assist`).
 pub(crate) use by_name::{AssistRequest, PlayerLookup, TargetByNameRequest};
+// The one SetSelection path, for the loot response's select (`0x48f3a0`).
+pub(crate) use by_name::SelectCommit;
 // The reaction decode and its faction catalog, which also tint the target frame
 // (`TargetFrame_CheckFaction`); `duel_rung` is the same walk, for `/reaction`.
 pub(crate) use ring::{duel_rung, ring_reaction, ring_variant, Factions, RingVariant};

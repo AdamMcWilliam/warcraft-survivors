@@ -1,7 +1,7 @@
 //! The loot window's packet handlers: the [`LootState`] session and the [`LootLatch`] the feed
 //! reads, the fishing verdicts, and the item push behind "You receive …".
 
-use benilla_protocol::messages::{ItemPushResult, LootItem};
+use benilla_protocol::messages::ItemPushResult;
 use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::prelude::*;
 
@@ -25,23 +25,28 @@ pub(super) fn register(app: &mut App) {
         .net_handler(K::Disconnected, on_session_end);
 }
 
-fn on_response(
-    In(ev): In<SessionEvent>,
-    mut loot: ResMut<LootState>,
-    mut latch: ResMut<LootLatch>,
-    commands: Res<NetCommands>,
-) {
-    if let SessionEvent::LootResponse {
+/// An admitted response selects a looted unit (`0x5ebc35` → `0x48f3a0`) before the window opens
+/// (`0x4c1cb0`), so the outgoing target's teardown closes a window still open on it.
+fn on_response(In(ev): In<SessionEvent>, mut select: crate::target::SelectCommit) {
+    let SessionEvent::LootResponse {
         guid,
         loot_type,
         gold,
         items,
     } = ev
-    {
-        loot_response(
-            guid, loot_type, gold, items, &mut loot, &mut latch, &commands,
-        );
+    else {
+        return;
+    };
+    let seam = &mut select.seam;
+    if !admit_response(guid, loot_type, &mut seam.loot_latch, &seam.net) {
+        return;
     }
+    debug!(
+        "net: loot response {guid:#x} type {loot_type} gold {gold} {} item(s)",
+        items.len()
+    );
+    select.select_unit(guid);
+    select.seam.loot.open(guid, loot_type, gold, items);
 }
 
 fn on_error(
@@ -151,17 +156,9 @@ const SERVER_STARTED_LOOT: [u8; 3] = [2, 3, 4];
 /// `SMSG_LOOT_RESPONSE`'s item shape, behind the admission gate `0x5eb924`: it opens when the
 /// latch holds the packet's guid, or when the latch is cold and the type is server-started.
 /// Anything else is refused (`0x5eb963`): no window, a `CMSG_LOOT_RELEASE` for the packet's guid,
-/// and the latch cleared whatever it held. An open writes the latch (`0x5ebb60`) and plays no
-/// anim; a chest already knelt at its `SMSG_SPELL_GO` (`0x6e831b`).
-fn loot_response(
-    guid: u64,
-    loot_type: u8,
-    gold: u32,
-    items: Vec<LootItem>,
-    loot: &mut LootState,
-    latch: &mut LootLatch,
-    net: &NetCommands,
-) {
+/// and the latch cleared whatever it held. An admitted one writes the latch (`0x5ebb60`) and plays
+/// no anim; a chest already knelt at its `SMSG_SPELL_GO` (`0x6e831b`).
+fn admit_response(guid: u64, loot_type: u8, latch: &mut LootLatch, net: &NetCommands) -> bool {
     let accept = match latch.0 {
         Some(latched) => latched == guid,
         None => SERVER_STARTED_LOOT.contains(&loot_type),
@@ -176,15 +173,11 @@ fn loot_response(
             let _ = net.0.send(ClientCommand::LootRelease { guid });
         }
         latch.0 = None; // not guid-matched: `0x5eb9d2` clears whatever was there
-        return;
+        return false;
     }
-    debug!(
-        "net: loot response {guid:#x} type {loot_type} gold {gold} {} item(s)",
-        items.len()
-    );
-    loot.open(guid, loot_type, gold, items);
     // A fishing bobber first arms here and still does not kneel: `LootKneel` decides the pose.
     latch.0 = Some(guid);
+    true
 }
 
 /// `SMSG_FISH_ESCAPED` (the skill roll failed) or `SMSG_FISH_NOT_HOOKED` (clicked before the
@@ -513,48 +506,68 @@ mod tests {
     /// No `CMSG_LOOT` armed the latch; a chest's answer is wire type 2 (`0x5eb94b`-`0x5eb95b`).
     #[test]
     fn a_cold_latch_admits_a_server_started_loot_and_arms_on_it() {
-        let (net, rx) = net();
-        let mut loot = LootState::default();
-        let mut latch = LootLatch::default();
-        assert_eq!(latch.0, None, "no CMSG_LOOT was sent, so nothing armed it");
+        let (mut world, rx) = tabbed_world();
+        assert_eq!(
+            world.resource::<LootLatch>().0,
+            None,
+            "no CMSG_LOOT was sent, so nothing armed it"
+        );
 
-        loot_response(CHEST, 2, 0, Vec::new(), &mut loot, &mut latch, &net);
-        assert_eq!(latch.0, Some(CHEST), "the open window is the loot session");
-        assert_eq!(loot.source(), Some(CHEST), "…and the window opened");
+        respond(&mut world, CHEST, 2);
+        assert_eq!(
+            world.resource::<LootLatch>().0,
+            Some(CHEST),
+            "the open window is the loot session"
+        );
+        assert_eq!(
+            world.resource::<LootState>().source(),
+            Some(CHEST),
+            "…and the window opened"
+        );
         assert!(
             rx.try_recv().is_err(),
             "an accepted response bounces nothing"
         );
 
-        loot_release_response(CHEST, &mut loot, &mut latch, no_item!());
-        assert_eq!(latch.0, None, "the release ends the session");
+        world
+            .run_system_once_with(
+                on_release_response,
+                SessionEvent::LootReleaseResponse { guid: CHEST },
+            )
+            .expect("the handler runs as a one-shot system");
+        assert_eq!(
+            world.resource::<LootLatch>().0,
+            None,
+            "the release ends the session"
+        );
     }
 
     /// The `CMSG_LOOT` send armed the same guid: the match branch (`0x5eb93e`).
     #[test]
     fn a_matching_latch_admits_any_loot_type() {
-        let (net, _rx) = net();
-        let mut loot = LootState::default();
-        let mut latch = LootLatch(Some(CORPSE)); // the `CMSG_LOOT` send
-        loot_response(CORPSE, 1, 0, Vec::new(), &mut loot, &mut latch, &net);
-        assert_eq!(latch.0, Some(CORPSE));
-        assert_eq!(loot.source(), Some(CORPSE));
+        let (mut world, _rx) = tabbed_world();
+        world.resource_mut::<LootLatch>().0 = Some(CORPSE); // the `CMSG_LOOT` send
+        respond(&mut world, CORPSE, 1);
+        assert_eq!(world.resource::<LootLatch>().0, Some(CORPSE));
+        assert_eq!(world.resource::<LootState>().source(), Some(CORPSE));
     }
 
     /// The refusal arm (`0x5eb963`): a type-1 answer on a cold latch answers nothing we asked.
     #[test]
     fn a_cold_latch_refuses_a_corpse_typed_response_and_bounces_it() {
-        let (net, rx) = net();
-        let mut loot = LootState::default();
-        let mut latch = LootLatch::default();
+        let (mut world, rx) = tabbed_world();
 
-        loot_response(CORPSE, 1, 0, Vec::new(), &mut loot, &mut latch, &net);
+        respond(&mut world, CORPSE, 1);
         assert_eq!(
-            loot.source(),
+            world.resource::<LootState>().source(),
             None,
             "no window for an unasked-for corpse answer"
         );
-        assert_eq!(latch.0, None, "…and nothing latched");
+        assert_eq!(
+            world.resource::<LootLatch>().0,
+            None,
+            "…and nothing latched"
+        );
         assert!(
             matches!(rx.try_recv(), Ok(ClientCommand::LootRelease { guid }) if guid == CORPSE),
             "the refusal releases the object the PACKET named"
@@ -564,12 +577,15 @@ mod tests {
     /// The refusal's clear is not guid-matched (`0x5eb9d2`): a response for B drops a latch on A.
     #[test]
     fn a_refusal_drops_whatever_latch_was_live_not_just_a_matching_one() {
-        let (net, rx) = net();
-        let mut loot = LootState::default();
-        let mut latch = LootLatch(Some(CORPSE));
+        let (mut world, rx) = tabbed_world();
+        world.resource_mut::<LootLatch>().0 = Some(CORPSE);
 
-        loot_response(CHEST, 1, 0, Vec::new(), &mut loot, &mut latch, &net);
-        assert_eq!(latch.0, None, "A's latch is dropped by B's refusal");
+        respond(&mut world, CHEST, 1);
+        assert_eq!(
+            world.resource::<LootLatch>().0,
+            None,
+            "A's latch is dropped by B's refusal"
+        );
         assert!(
             matches!(rx.try_recv(), Ok(ClientCommand::LootRelease { guid }) if guid == CHEST),
             "…and it is B that gets released"
@@ -685,6 +701,367 @@ mod tests {
             .drain()
             .next()
             .is_none());
+    }
+
+    /// A live creature: `TYPEMASK_OBJECT | TYPEMASK_UNIT`, so it is the Tab target.
+    const KOBOLD: u64 = 0xF130_0000_0600_00CD;
+    /// A creature flagged `UNIT_FLAG_NOT_SELECTABLE`.
+    const UNSELECTABLE: u64 = 0xF130_0000_0700_00EF;
+
+    const OBJECT_FIELD_TYPE: u16 = 2;
+    const OBJECT_FIELD_ENTRY: u16 = 3;
+    /// `OBJECT_FIELD_TYPE` masks: `TYPEMASK_OBJECT` with `UNIT`, `PLAYER` or `GAMEOBJECT`.
+    const TYPE_UNIT: u32 = 0x09;
+    const TYPE_PLAYER: u32 = 0x19;
+    const TYPE_GAMEOBJECT: u32 = 0x21;
+    /// `UNIT_FLAG_NOT_SELECTABLE`.
+    const NOT_SELECTABLE: u32 = 1 << 25;
+    const KOBOLD_ENTRY: u32 = 6;
+    const CORPSE_ENTRY: u32 = 257;
+
+    /// Us, the Tab target selected, and a corpse, a chest and an unselectable unit beside it, all
+    /// streamed: the issue's spot, with what [`on_response`] reads and the selection commit writes.
+    fn tabbed_world() -> (World, crossbeam_channel::Receiver<ClientCommand>) {
+        let mut world = World::new();
+        let rx = seat_tabbed(&mut world);
+        (world, rx)
+    }
+
+    /// [`tabbed_world`]'s seating, into any world.
+    fn seat_tabbed(world: &mut World) -> crossbeam_channel::Receiver<ClientCommand> {
+        use crate::net::{Guid, GuidIndex, NetEntity, ObjectStore, SelfPlayer};
+        use benilla_protocol::field::{FIELD_UNIT_FLAGS, FIELD_UNIT_HEALTH};
+        use benilla_protocol::messages::{ObjectFields, ObjectType};
+        use benilla_protocol::EntityKind::{GameObject, Unit};
+        let unit = |kind, type_mask, pairs: &[(u16, u32)]| {
+            let mut fields = vec![(OBJECT_FIELD_TYPE, type_mask)];
+            fields.extend_from_slice(pairs);
+            (
+                NetEntity {
+                    kind,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                ObjectStore(ObjectFields::from_pairs(&fields).into_created(match kind {
+                    GameObject => ObjectType::GameObject,
+                    _ => ObjectType::Unit,
+                })),
+            )
+        };
+        let (net, rx) = net();
+        world.insert_resource(net);
+        world.init_resource::<LootState>();
+        world.init_resource::<LootLatch>();
+        world.init_resource::<crate::spell::QueuedMeleeSpell>();
+        world.init_resource::<crate::spell::AutoRepeatActive>();
+        world.init_resource::<bevy::ecs::message::Messages<crate::creature_anim::SheathRequest>>();
+        world.init_resource::<GuidIndex>();
+        world.init_resource::<crate::net::Reputations>();
+        world.init_resource::<crate::target::AssistAttack>();
+        world.init_resource::<crate::target::Selection>();
+        world.init_resource::<PendingItemOps>();
+        world.init_resource::<LockTransitions>();
+        world.init_resource::<bevy::ecs::message::Messages<crate::target::DeselectGuid>>();
+        world.init_resource::<bevy::ecs::message::Messages<crate::player::StandStateRequest>>();
+        world.spawn((
+            SelfPlayer,
+            Guid(1),
+            unit(Unit, TYPE_PLAYER, &[(FIELD_UNIT_HEALTH, 100)]),
+        ));
+        for (guid, bundle) in [
+            (
+                KOBOLD,
+                unit(
+                    Unit,
+                    TYPE_UNIT,
+                    &[(OBJECT_FIELD_ENTRY, KOBOLD_ENTRY), (FIELD_UNIT_HEALTH, 100)],
+                ),
+            ),
+            (
+                CORPSE,
+                unit(
+                    Unit,
+                    TYPE_UNIT,
+                    &[(OBJECT_FIELD_ENTRY, CORPSE_ENTRY), (FIELD_UNIT_HEALTH, 0)],
+                ),
+            ),
+            (CHEST, unit(GameObject, TYPE_GAMEOBJECT, &[])),
+            (
+                UNSELECTABLE,
+                unit(
+                    Unit,
+                    TYPE_UNIT,
+                    &[(FIELD_UNIT_HEALTH, 0), (FIELD_UNIT_FLAGS, NOT_SELECTABLE)],
+                ),
+            ),
+        ] {
+            let e = world.spawn((Guid(guid), bundle)).id();
+            world.resource_mut::<GuidIndex>().0.insert(guid, e);
+        }
+        let kobold = world.resource::<GuidIndex>().0[&KOBOLD];
+        let mut selection = world.resource_mut::<crate::target::Selection>();
+        selection.target = Some(kobold);
+        selection.guid = Some(KOBOLD);
+        rx
+    }
+
+    /// A response for `guid` of `loot_type` with no rows, through the registered handler.
+    fn respond(world: &mut World, guid: u64, loot_type: u8) {
+        world
+            .run_system_once_with(
+                on_response,
+                SessionEvent::LootResponse {
+                    guid,
+                    loot_type,
+                    gold: 0,
+                    items: Vec::new(),
+                },
+            )
+            .expect("the handler runs as a one-shot system");
+    }
+
+    /// `0x5ebc35` → `0x48f3a0` → `SetSelection 0x493540` on the looted unit's guid.
+    #[test]
+    fn a_loot_window_opening_on_a_unit_selects_it() {
+        let (mut world, rx) = tabbed_world();
+        world.resource_mut::<LootLatch>().0 = Some(CORPSE); // the `CMSG_LOOT` send
+        respond(&mut world, CORPSE, 1);
+        assert_eq!(world.resource::<LootState>().source(), Some(CORPSE));
+        let selection = world.resource::<crate::target::Selection>();
+        assert_eq!(
+            selection.guid,
+            Some(CORPSE),
+            "the looted body is the target"
+        );
+        assert_eq!(
+            selection.last,
+            Some(KOBOLD),
+            "…through SetSelection's stamp"
+        );
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            matches!(sent[..], [ClientCommand::SetSelection { guid }] if guid == CORPSE),
+            "{sent:?}"
+        );
+
+        // The setter's dedup: a second window on the selected body sends nothing.
+        respond(&mut world, CORPSE, 1);
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// `0x48f3a0` tests `TYPEMASK_UNIT`; `SetSelection`'s `IsSelectable` refuses the flagged unit;
+    /// a refused response never reaches `0x5ebc35`.
+    #[test]
+    fn a_chest_an_unselectable_unit_and_a_refusal_leave_the_target() {
+        for (guid, latched, loot_type) in [
+            (CHEST, true, 1),
+            (UNSELECTABLE, true, 1),
+            (CORPSE, false, 1),
+        ] {
+            let (mut world, rx) = tabbed_world();
+            world.resource_mut::<LootLatch>().0 = latched.then_some(guid);
+            respond(&mut world, guid, loot_type);
+            assert_eq!(
+                world.resource::<crate::target::Selection>().guid,
+                Some(KOBOLD),
+                "{guid:#x}"
+            );
+            assert!(
+                !rx.try_iter()
+                    .any(|c| matches!(c, ClientCommand::SetSelection { .. })),
+                "{guid:#x}"
+            );
+        }
+    }
+
+    /// The selection comes before the window (`0x48f3be`, then `0x4c1cb0`): the outgoing target's
+    /// teardown closes the window still open on it, its release ahead of the new selection.
+    #[test]
+    fn the_selection_tears_down_the_old_targets_window_before_the_new_one_opens() {
+        let (mut world, rx) = tabbed_world();
+        world
+            .resource_mut::<LootState>()
+            .open(KOBOLD, 2, 0, Vec::new());
+        world.resource_mut::<LootLatch>().0 = Some(CORPSE);
+        respond(&mut world, CORPSE, 1);
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            matches!(
+                sent[..],
+                [ClientCommand::LootRelease { guid: a }, ClientCommand::SetSelection { guid: b }]
+                    if a == KOBOLD && b == CORPSE
+            ),
+            "{sent:?}"
+        );
+        assert_eq!(world.resource::<LootState>().source(), Some(CORPSE));
+        // [`LootLatch`]'s deviation: the reference's teardown zeroes it here (`0x48f2c9`).
+        assert_eq!(world.resource::<LootLatch>().0, Some(CORPSE));
+    }
+
+    /// `SetSelection`'s switch while swinging (`0x493a08`, `0x4938a1`): the swing at the Tab target
+    /// stops, and none opens on the body.
+    #[test]
+    fn looting_while_swinging_at_the_tab_target_stops_the_swing() {
+        use crate::net::SelfPlayer;
+        let (mut world, rx) = tabbed_world();
+        let me = world
+            .query_filtered::<Entity, With<SelfPlayer>>()
+            .single(&world)
+            .expect("us");
+        world
+            .entity_mut(me)
+            .insert(crate::creature_anim::Engaged(KOBOLD));
+        world.resource_mut::<LootLatch>().0 = Some(CORPSE);
+        respond(&mut world, CORPSE, 1);
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            matches!(
+                sent[..],
+                [ClientCommand::AttackStop, ClientCommand::SetSelection { guid }] if guid == CORPSE
+            ),
+            "{sent:?}"
+        );
+    }
+
+    /// `StartAttack`'s target gate (`0x5ecc16`-`0x5ecc29`): a body is no swing target even when
+    /// hostile, so looting one mid-swing stops and selects, and swings at nothing.
+    #[test]
+    fn looting_a_hostile_body_while_swinging_never_swings_at_it() {
+        use crate::net::{ObjectStore, SelfPlayer};
+        use benilla_protocol::field::{FIELD_UNIT_FACTIONTEMPLATE, FIELD_UNIT_HEALTH};
+        use benilla_protocol::messages::{ObjectFields, ObjectType};
+        const UNIT_FIELD_BYTES_0: u16 = 36;
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let (factions, stormwind, reps) = crate::target::stormwind_fixture(&mut chain, 0);
+        let me_store = ObjectStore(
+            ObjectFields::from_pairs(&[
+                (OBJECT_FIELD_TYPE, TYPE_PLAYER),
+                (FIELD_UNIT_HEALTH, 100),
+                (FIELD_UNIT_FACTIONTEMPLATE, stormwind),
+                (UNIT_FIELD_BYTES_0, crate::target::HUMAN_WARRIOR),
+            ])
+            .into_created(ObjectType::Player),
+        );
+        let creature = |template, health| {
+            ObjectStore(
+                ObjectFields::from_pairs(&[
+                    (OBJECT_FIELD_TYPE, TYPE_UNIT),
+                    (FIELD_UNIT_HEALTH, health),
+                    (FIELD_UNIT_FACTIONTEMPLATE, template),
+                ])
+                .into_created(ObjectType::Unit),
+            )
+        };
+        let hostile = (1u32..4096)
+            .find(|&t| {
+                crate::target::can_attack(
+                    Some(&creature(t, 100)),
+                    Some(&factions),
+                    &reps,
+                    Some(&me_store),
+                )
+            })
+            .expect("a template a Stormwind human can attack");
+
+        let (mut world, rx) = tabbed_world();
+        world.insert_resource(factions);
+        world.insert_resource(reps);
+        let me = world
+            .query_filtered::<Entity, With<SelfPlayer>>()
+            .single(&world)
+            .expect("us");
+        world
+            .entity_mut(me)
+            .insert((me_store, crate::creature_anim::Engaged(KOBOLD)));
+        let corpse = world.resource::<crate::net::GuidIndex>().0[&CORPSE];
+        world.entity_mut(corpse).insert(creature(hostile, 0));
+        world.resource_mut::<LootLatch>().0 = Some(CORPSE);
+        respond(&mut world, CORPSE, 1);
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            matches!(
+                sent[..],
+                [ClientCommand::AttackStop, ClientCommand::SetSelection { guid }] if guid == CORPSE
+            ),
+            "{sent:?}"
+        );
+    }
+
+    /// The issue's symptom on the stock frames: the Tab target is on `TargetFrame` when the body's
+    /// window opens, and the unit feed then names the body there (`TargetFrame.lua:63`,
+    /// `UnitFrame.lua:25`).
+    #[test]
+    fn the_stock_target_frame_names_the_looted_body() {
+        use benilla_ui::script::UiScript;
+        benilla_formats::wow_data_or_skip!();
+        let mut s = UiScript::new().expect("VM");
+        s.set_screen_size(1024.0, 768.0);
+        for f in crate::ui_script::test_ui::production_order(&[&[
+            "Interface\\FrameXML\\Fonts.xml",
+            "Interface\\FrameXML\\GlobalStrings.lua",
+            "Interface\\FrameXML\\UIParent.xml",
+            "Interface\\FrameXML\\BasicControls.xml",
+            "Interface\\FrameXML\\MoneyFrame.lua",
+            "Interface\\FrameXML\\MoneyFrame.xml",
+            "Interface\\FrameXML\\GameTooltip.xml",
+            "Interface\\FrameXML\\UIDropDownMenu.xml",
+            "Interface\\FrameXML\\TextStatusBar.lua",
+            "Interface\\FrameXML\\TextStatusBar.xml",
+            "Interface\\FrameXML\\BuffFrame.xml",
+            "Interface\\FrameXML\\CombatFeedback.xml",
+            "Interface\\FrameXML\\UnitPopup.xml",
+            "Interface\\FrameXML\\UnitFrame.xml",
+            "Interface\\FrameXML\\PlayerFrame.xml",
+            "Interface\\FrameXML\\PartyFrame.xml",
+            "Interface\\FrameXML\\TargetFrame.xml",
+        ]]) {
+            crate::ui_script::test_ui::load_ui(&s, f);
+        }
+
+        let mut app = App::new();
+        seat_tabbed(app.world_mut());
+        let mut names = crate::names::NameCache::default();
+        for (entry, name) in [
+            (KOBOLD_ENTRY, "Kobold Vermin"),
+            (CORPSE_ENTRY, "Kobold Worker"),
+        ] {
+            names.insert_creature(
+                entry,
+                Some(crate::names::CreatureRecord {
+                    name: name.into(),
+                    subname: None,
+                    creature_type: 7,
+                    pet_family: 0,
+                    rank: 0,
+                    type_flags: 0,
+                    civilian: false,
+                    racial_leader: false,
+                    display_id: 0,
+                }),
+            );
+        }
+        app.insert_resource(names)
+            .init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .init_resource::<crate::ui_guild::GuildState>()
+            .insert_non_send_resource(s);
+        crate::ui_unit::add_unit_feed(&mut app);
+        let shown = |app: &mut App| -> String {
+            let s = app.world().non_send_resource::<UiScript>();
+            assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+            s.eval("return TargetFrame:IsShown() and TargetFrame.name:GetText() or ''")
+                .expect("the target frame's name")
+        };
+
+        app.update();
+        assert_eq!(shown(&mut app), "Kobold Vermin", "the Tab target");
+
+        app.world_mut().resource_mut::<LootLatch>().0 = Some(CORPSE);
+        respond(app.world_mut(), CORPSE, 1);
+        app.update();
+        assert_eq!(shown(&mut app), "Kobold Worker", "the looted body");
     }
 
     /// Only a releasing arm reaches `UnlockItem 0x495420`, through the tail `0x5ebac2`.

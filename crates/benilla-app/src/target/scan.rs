@@ -690,7 +690,7 @@ impl AttackPick<'_, '_> {
 /// The final gate's target legs (`0x613152`–`0x613169`): alive, where a zero-health target passes
 /// iff `UNIT_DYNAMIC_FLAGS` bit 5 is set (`0x613159`), and the full `CanAttack 0x606980`. A target
 /// with no descriptor fails [`can_attack`]; the reference always holds a live unit here.
-fn attack_target_valid(
+pub(super) fn attack_target_valid(
     store: Option<&ObjectStore>,
     factions: Option<&Factions>,
     reputations: &Reputations,

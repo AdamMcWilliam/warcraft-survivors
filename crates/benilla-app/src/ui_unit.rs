@@ -1618,6 +1618,14 @@ fn combo_edge(last: Option<(u8, u64)>, now: (u8, u64)) -> Option<bool> {
     (last != Some(now)).then(|| last.map(|(count, _)| count) != Some(now.0))
 }
 
+/// The bare unit feed, for a test driving the stock unit frames off engine state.
+#[cfg(test)]
+pub(crate) fn add_unit_feed(app: &mut App) {
+    app.init_resource::<UnitFeedState>()
+        .add_message::<crate::net::FieldChanged>()
+        .add_systems(Update, feed_units);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
