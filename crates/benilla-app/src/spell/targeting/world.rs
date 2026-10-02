@@ -189,6 +189,7 @@ mod tests {
                 crate::target::PickOcclusion {
                     distance: 5.0,
                     point: Some(Vec3::new(1.0, 2.0, 3.0)),
+                    ray: None,
                 };
         };
         let run = |world: &mut World, id: SystemId| {

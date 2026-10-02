@@ -176,6 +176,27 @@ pub(crate) struct Feedback<'w> {
     stone_uses: MessageWriter<'w, crate::ui_dialog_verbs::MeetingStoneUse>,
 }
 
+impl Feedback<'_> {
+    /// Whether a walk started; the leash's refusal says `ERR_AUTOFOLLOW_TOO_FAR` (`0x61110c`).
+    fn walked(&mut self, started: Result<(), crate::player::Refused>) -> bool {
+        match started {
+            Ok(()) => true,
+            Err(crate::player::Refused::TooFar) => {
+                self.errors
+                    .0
+                    .push(crate::ui_action::UiError::key("ERR_AUTOFOLLOW_TOO_FAR"));
+                false
+            }
+            Err(crate::player::Refused::Silent) => false,
+        }
+    }
+}
+
+enum MeleeApproach {
+    Face(Vec3),
+    Walk { at: Vec3, stop: f32 },
+}
+
 /// The dispatchers, which take the object (`0x5f0130`, `0x5df2a0`, `0x5df130`, `0x5f86b0`,
 /// `0x5f05e0`): a right-click reaches them through [`act_on_right_click`] and a crate's
 /// [`Interact`] through [`act_on_interact`], both with Click to Move's walk, an approach's arrival
@@ -256,17 +277,26 @@ impl Dispatch<'_, '_> {
         let Ok(at) = self.places.get(target).map(|t| t.translation) else {
             return false;
         };
-        match self.auto.start(verb, guid, subject, at, stop) {
-            Ok(()) => true,
-            Err(crate::player::Refused::TooFar) => {
-                self.feedback
-                    .errors
-                    .0
-                    .push(crate::ui_action::UiError::key("ERR_AUTOFOLLOW_TOO_FAR"));
-                false
-            }
-            Err(crate::player::Refused::Silent) => false,
+        let started = self.auto.start(verb, guid, subject, at, stop);
+        self.feedback.walked(started)
+    }
+
+    /// `0x60fcc0`'s two arms for an attack: inside the melee reach `max(rA + rB + 1.3333, 5)` a
+    /// turn to face the enemy (`0x6100a0`), beyond it a walk to where it stands, stopping at the
+    /// square root (`0x6111ab`) of the reach less its offset (`0x61131d`), measured between the
+    /// player and itself, as the arm names the player's own guid (`0x60fe5f`).
+    fn melee_approach(&self, target: Entity) -> Option<MeleeApproach> {
+        let d2 = self.dist_sq(target)?;
+        let at = self.places.get(target).ok()?.translation;
+        let reach = self.melee_reach(target);
+        if d2 < reach * reach {
+            return Some(MeleeApproach::Face(at));
         }
+        let own = self.self_store().map_or(cursor_mode::MELEE_FLOOR, |me| {
+            cursor_mode::melee_reach(me, me)
+        });
+        let stop = (own - cursor_mode::MELEE_OFFSET).sqrt();
+        Some(MeleeApproach::Walk { at, stop })
     }
 
     /// A GameObject out of its use range (`0x5f3346`, error `0xe1`): the approach (`0x610300`) when
@@ -629,8 +659,23 @@ pub(super) fn act_on_right_click(
     press: Res<PressPick>,
     mut selection: ResMut<Selection>,
     mut dispatch: Dispatch,
+    payload_held: Res<crate::ui_script::CursorPayloadHeld>,
 ) {
     if clicks.read().last().is_none() {
+        return;
+    }
+    // The router's other legs (`0x481f60`): the world hit walks there (`0x5e0378`), and nothing
+    // walks along the ray when the cursor is empty (`0x492d50`).
+    if press.hovered.any().is_none() && !press.hovered.refused && press.object.target.is_none() {
+        match (press.occlusion.point, press.occlusion.ray) {
+            (Some(at), _) => {
+                dispatch.auto.walk_to_ground(at);
+            }
+            (None, Some(ray)) if !payload_held.0 => {
+                dispatch.auto.walk_toward_sky(*ray);
+            }
+            _ => {}
+        }
         return;
     }
     interact(&mut dispatch, &press, Select::First(&mut selection));
@@ -820,6 +865,21 @@ fn interact(dispatch: &mut Dispatch, press: &PressPick, mut select: Select) {
     };
     match unit_branch(attack, dead_fork, leg) {
         UnitBranch::Attack => {
+            // `0x60c22b`, past the dead and mounted gates (`0x60c1a1`, `0x60c1bc`) and before
+            // StartAttack, so a refused swing still walks.
+            let refused = dispatch
+                .self_store()
+                .is_some_and(|s| s.0.is_dead_or_ghost() || s.0.unit_mount_display_id() > 0);
+            match dispatch.melee_approach(entity).filter(|_| !refused) {
+                Some(MeleeApproach::Face(at)) => {
+                    dispatch.auto.face(at);
+                }
+                Some(MeleeApproach::Walk { at, stop }) => {
+                    let started = dispatch.auto.walk_into_melee(at, stop);
+                    dispatch.feedback.walked(started);
+                }
+                None => {}
+            }
             // Silent after the select: the click's `0x60c247 call 0x5ecb70` has no `DisplayError`,
             // and the red `ERR_ATTACK_*` lines are `0x612df0`'s (the Attack action, pet attack,
             // TryCast). The predicate is `0x612df0`'s; `0x5ecb70`'s own set is not transcribed.
@@ -1995,6 +2055,7 @@ mod tests {
         world.init_resource::<crate::player::Approach>();
         world.init_resource::<crate::player::FollowState>();
         world.init_resource::<crate::player::Player>();
+        world.init_resource::<crate::ui_script::CursorPayloadHeld>();
         world.init_resource::<Messages<Interact>>();
         world.init_resource::<crate::net::Reputations>();
         world.init_resource::<crate::ui_loot::LootConfig>();
@@ -2749,5 +2810,196 @@ mod tests {
         let keys = click_far_object(&mut world, node, 120.0);
         assert_eq!(keys, vec!["ERR_USE_TOO_FAR"]);
         assert!(!world.resource::<crate::player::Approach>().active());
+    }
+
+    fn right_click_world_at(world: &mut World, occlusion: PickOcclusion) {
+        *world.resource_mut::<PressPick>() = PressPick {
+            occlusion,
+            ..PressPick::default()
+        };
+        world
+            .resource_mut::<Messages<WorldRightClick>>()
+            .write(WorldRightClick);
+        world.run_system_once(act_on_right_click).unwrap();
+    }
+
+    /// `0x5e0378`: a right-click on the ground walks there through `CanAutoInteract`, sending
+    /// nothing and keeping the selection; a held payload is dropped (`0x492ca9`) and the walk
+    /// still starts.
+    #[test]
+    fn a_ground_right_click_walks_there_only_with_click_to_move_on() {
+        for (walk, held) in [(true, false), (true, true), (false, false)] {
+            let (mut world, vendor, rx) = walking_world(Vec3::new(14.0, 0.0, 0.0), walk);
+            world
+                .resource_mut::<crate::ui_script::CursorPayloadHeld>()
+                .0 = held;
+            // `0x5e0320` returns without deselecting: the vendor stays the target.
+            let vendor_guid = world.get::<Guid>(vendor).unwrap().0;
+            let mut selection = world.resource_mut::<Selection>();
+            selection.target = Some(vendor);
+            selection.guid = Some(vendor_guid);
+            right_click_world_at(
+                &mut world,
+                PickOcclusion {
+                    distance: 10.0,
+                    point: Some(Vec3::new(0.0, 0.0, -10.0)),
+                    ..PickOcclusion::default()
+                },
+            );
+            let approach = world.resource::<crate::player::Approach>();
+            assert_eq!(approach.active(), walk, "AutoInteract {walk}, held {held}");
+            if walk {
+                assert!((approach.stop_distance().unwrap() - 0.5).abs() < 1e-6);
+            }
+            assert!(rx.try_iter().next().is_none());
+            assert_eq!(world.resource::<Selection>().guid, Some(vendor_guid));
+        }
+    }
+
+    fn attack_wolf_at(at: Vec3, reach: f32) -> (World, crossbeam_channel::Receiver<ClientCommand>) {
+        const F_COMBAT_REACH: u16 = 130;
+        let (mut world, _vendor, rx) = walking_world(Vec3::new(14.0, 0.0, 0.0), true);
+        let wolf = world
+            .spawn((
+                Guid(WOLF),
+                store(&[
+                    (F_HEALTH, 100),
+                    (F_MAXHEALTH, 100),
+                    (F_COMBAT_REACH, reach.to_bits()),
+                ]),
+                Transform::from_translation(at),
+            ))
+            .id();
+        *world.resource_mut::<PressPick>() = PressPick {
+            hovered: Hovered {
+                target: Some(wolf),
+                guid: Some(WOLF),
+                distance: at.length(),
+                ..Hovered::default()
+            },
+            cursor: WorldCursor {
+                kind: cursor_mode::CursorKind::Attack,
+                unable: false,
+            },
+            attack_fork: cursor_mode::AttackFork(true),
+            ..PressPick::default()
+        };
+        world
+            .resource_mut::<Messages<WorldRightClick>>()
+            .write(WorldRightClick);
+        world.run_system_once(act_on_right_click).unwrap();
+        (world, rx)
+    }
+
+    /// `0x60c22b` → `0x60fcc0`: out of melee the walk arms before the swing, stopping at
+    /// `sqrt(max(2·own reach + 1.3333, 5) − 1.3333)`, the enemy's own reach not counted
+    /// (`0x60fe5f`, `0x6112b6`, `0x61131d`, `0x6111ab`).
+    #[test]
+    fn an_enemy_out_of_melee_is_walked_into_before_the_swing() {
+        let (world, rx) = attack_wolf_at(Vec3::new(0.0, 0.0, -12.0), 4.0);
+        let stop = world
+            .resource::<crate::player::Approach>()
+            .stop_distance()
+            .expect("the melee walk starts");
+        assert!(
+            (stop - (5.0_f32 - 1.333_333_3).sqrt()).abs() < 1e-3,
+            "{stop}"
+        );
+        assert!(rx
+            .try_iter()
+            .any(|c| matches!(c, ClientCommand::AttackSwing { guid: WOLF })));
+    }
+
+    /// Inside `max(rA + rB + 1.3333, 5)` the attack turns to face the enemy where it stands
+    /// (`0x60fd80`) and swings.
+    #[test]
+    fn an_enemy_in_melee_is_faced_without_a_walk() {
+        let (world, rx) = attack_wolf_at(Vec3::new(0.0, 0.0, -6.0), 4.0);
+        assert!(world.resource::<crate::player::Approach>().facing());
+        assert!(rx
+            .try_iter()
+            .any(|c| matches!(c, ClientCommand::AttackSwing { guid: WOLF })));
+    }
+
+    /// The mounted gate (`0x60c1bc`) skips the walk and the swing alike.
+    #[test]
+    fn a_mounted_attack_does_not_walk() {
+        const F_MOUNT: u16 = benilla_protocol::field::FIELD_UNIT_MOUNTDISPLAYID;
+        let (mut world, _vendor, rx) = walking_world(Vec3::new(14.0, 0.0, 0.0), true);
+        let me = world
+            .query_filtered::<Entity, With<SelfPlayer>>()
+            .single(&world)
+            .unwrap();
+        world.entity_mut(me).insert(store(&[
+            (F_HEALTH, 100),
+            (F_MAXHEALTH, 100),
+            (F_MOUNT, 14_337),
+        ]));
+        let wolf = world
+            .spawn((
+                Guid(WOLF),
+                store(&[(F_HEALTH, 100), (F_MAXHEALTH, 100)]),
+                Transform::from_xyz(0.0, 0.0, -12.0),
+            ))
+            .id();
+        *world.resource_mut::<PressPick>() = PressPick {
+            hovered: Hovered {
+                target: Some(wolf),
+                guid: Some(WOLF),
+                distance: 12.0,
+                ..Hovered::default()
+            },
+            attack_fork: cursor_mode::AttackFork(true),
+            ..PressPick::default()
+        };
+        world
+            .resource_mut::<Messages<WorldRightClick>>()
+            .write(WorldRightClick);
+        world.run_system_once(act_on_right_click).unwrap();
+        assert!(!world.resource::<crate::player::Approach>().active());
+        assert!(
+            !rx.try_iter()
+                .any(|c| matches!(c, ClientCommand::AttackSwing { .. })),
+            "the mounted gate skips StartAttack too"
+        );
+    }
+
+    /// The melee row's 80 yd leash (`0x60e652`) refuses with `ERR_AUTOFOLLOW_TOO_FAR` (`0x61110c`);
+    /// the swing still goes out (`0x60c247`).
+    #[test]
+    fn an_enemy_80_yards_off_is_too_far_to_walk_into() {
+        let (world, rx) = attack_wolf_at(Vec3::new(0.0, 0.0, -85.0), 1.5);
+        assert!(!world.resource::<crate::player::Approach>().active());
+        assert_eq!(
+            world.resource::<crate::ui_action::UiErrorKeys>().0,
+            vec![crate::ui_action::UiError::key("ERR_AUTOFOLLOW_TOO_FAR")]
+        );
+        assert!(rx
+            .try_iter()
+            .any(|c| matches!(c, ClientCommand::AttackSwing { guid: WOLF })));
+    }
+
+    /// `0x492d30`: a right-click on nothing walks along the ray, but not with a payload held
+    /// (`0x492d50`), which that click only drops.
+    #[test]
+    fn a_sky_right_click_walks_along_the_ray_with_an_empty_cursor() {
+        for held in [false, true] {
+            let (mut world, _vendor, _rx) = walking_world(Vec3::new(14.0, 0.0, 0.0), true);
+            world
+                .resource_mut::<crate::ui_script::CursorPayloadHeld>()
+                .0 = held;
+            right_click_world_at(
+                &mut world,
+                PickOcclusion {
+                    ray: Dir3::new(Vec3::new(0.0, 0.3, -1.0)).ok(),
+                    ..PickOcclusion::default()
+                },
+            );
+            assert_eq!(
+                world.resource::<crate::player::Approach>().active(),
+                !held,
+                "payload held {held}"
+            );
+        }
     }
 }

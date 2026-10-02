@@ -35,8 +35,7 @@ pub(super) fn update_pick_occlusion(
     occluders: Query<(), With<PickOccluder>>,
     mut occlusion: ResMut<PickOcclusion>,
 ) {
-    occlusion.distance = f32::INFINITY;
-    occlusion.point = None;
+    *occlusion = PickOcclusion::default();
     let (Ok((camera, cam_tf)), Ok(window)) = (camera.single(), window.single()) else {
         return;
     };
@@ -46,6 +45,7 @@ pub(super) fn update_pick_occlusion(
     let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else {
         return;
     };
+    occlusion.ray = Some(ray.direction);
     if let Some(hit) = spatial.cast_ray_predicate(
         ray.origin,
         ray.direction,
@@ -911,6 +911,7 @@ mod tests {
         world.insert_resource(PickOcclusion {
             distance: f32::INFINITY,
             point: None,
+            ray: None,
         });
         world.init_resource::<crate::vplates::PlateHover>();
         world.init_resource::<Hovered>();

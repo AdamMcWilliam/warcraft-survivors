@@ -202,6 +202,7 @@ mod tests {
             world.insert_resource(PickOcclusion {
                 distance: 10.0,
                 point: Some(Vec3::ZERO),
+                ray: None,
             });
             world
                 .resource_mut::<SpellTargeting>()

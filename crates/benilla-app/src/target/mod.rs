@@ -147,6 +147,8 @@ pub(crate) struct PickOcclusion {
     pub(crate) distance: f32,
     /// The world hit point, which the ground-targeting cursor rides, as in the reference.
     pub(crate) point: Option<Vec3>,
+    /// The cursor ray's direction, which a right-click on the sky walks along (`0x492d6c`).
+    pub(crate) ray: Option<Dir3>,
 }
 
 impl Default for PickOcclusion {
@@ -154,6 +156,7 @@ impl Default for PickOcclusion {
         Self {
             distance: f32::INFINITY,
             point: None,
+            ray: None,
         }
     }
 }

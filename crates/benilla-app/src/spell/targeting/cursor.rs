@@ -516,6 +516,7 @@ mod tests {
             world.insert_resource(PickOcclusion {
                 distance: 10.0,
                 point,
+                ray: None,
             });
             if let Some(distance) = go {
                 let chest = world.spawn(Transform::default()).id();
@@ -593,6 +594,7 @@ mod tests {
                 world.insert_resource(PickOcclusion {
                     distance: 10.0,
                     point: Some(Vec3::new(d, 0.0, 0.0)),
+                    ray: None,
                 });
                 let mut mods = SpellModifiers::default();
                 mods.set_class_family(3);
