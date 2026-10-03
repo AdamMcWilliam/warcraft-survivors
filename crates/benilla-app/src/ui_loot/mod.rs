@@ -363,7 +363,8 @@ impl LootLatch {
 /// A movement start that closes the loot: the reference's guard `0x60e990`, called by every
 /// movement-start emitter, turning included, but not by mouse-look facing. No loot target reaches
 /// the range gate `0x493230`, so there is no distance leash. vmangos also releases on movement
-/// (`MovementHandler.cpp:1104`), but the close is the client's.
+/// (`MovementHandler.cpp:1104`), but the close is the client's. A loot response that lands while
+/// we move sets it too (`0x5ebc3a`).
 #[derive(Resource, Default)]
 pub(crate) struct LootMoveStart(pub(crate) bool);
 
@@ -674,6 +675,7 @@ fn feed_loot(
     group: Res<GroupState>,
     names: Res<NameCache>,
     objects: LootSourceObjects,
+    mut moving: OpenWhileMoving,
 ) {
     let Some(mut script) = script else {
         return;
@@ -753,6 +755,19 @@ fn feed_loot(
                         }
                         Some(LootAction::Item { .. }) | None => {}
                     }
+                }
+            }
+            // The response's tail (`0x5ebc3a`-`0x5ebc51`) closes a window that opened while we
+            // move, after the copier's open and sweep and in the same handler: `LOOT_CLOSED` fires
+            // in this pass, so the window never paints.
+            if std::mem::take(&mut moving.move_start.0) {
+                let closed = close_on_move_start(&mut loot, &mut moving.latch, &commands);
+                if closed.is_some() {
+                    moving.dead.after_close(closed);
+                    script.set_loot(None);
+                    script.fire_event("LOOT_CLOSED", vec![]);
+                    *last = None;
+                    return;
                 }
             }
         }
@@ -860,6 +875,14 @@ fn close_on_move_start(
     }
     debug!("ui_loot: movement started with {source:#x} open — release");
     close_interaction(loot, latch, Some(commands))
+}
+
+/// What [`feed_loot`] needs to take the move-start close on a window it has just opened.
+#[derive(bevy::ecs::system::SystemParam)]
+struct OpenWhileMoving<'w, 's> {
+    move_start: ResMut<'w, LootMoveStart>,
+    latch: ResMut<'w, LootLatch>,
+    dead: DeadUnitDeselect<'w, 's>,
 }
 
 /// Sends what the Lua asked for, as the take dispatcher `0x4c2790(slot, flag)`: a row click
@@ -1170,6 +1193,11 @@ mod tests {
             let (tx, _rx) = crossbeam_channel::unbounded();
             let mut app = App::new();
             app.add_message::<crate::sound::LootPickupSound>()
+                // What the feed's move-start close reads (`OpenWhileMoving`).
+                .add_message::<crate::target::DeselectGuid>()
+                .init_resource::<LootMoveStart>()
+                .init_resource::<LootLatch>()
+                .init_resource::<crate::net::GuidIndex>()
                 .init_resource::<LootState>()
                 .init_resource::<crate::ui_chat::ChatLog>()
                 .init_resource::<GroupState>()
@@ -1227,6 +1255,11 @@ mod tests {
             let (tx, rx) = crossbeam_channel::unbounded();
             let mut app = App::new();
             app.add_message::<crate::sound::LootPickupSound>()
+                // What the feed's move-start close reads (`OpenWhileMoving`).
+                .add_message::<crate::target::DeselectGuid>()
+                .init_resource::<LootMoveStart>()
+                .init_resource::<LootLatch>()
+                .init_resource::<crate::net::GuidIndex>()
                 .init_resource::<LootState>()
                 .init_resource::<crate::ui_chat::ChatLog>()
                 .init_resource::<GroupState>()
@@ -1460,6 +1493,11 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.add_message::<crate::sound::LootPickupSound>()
+            // What the feed's move-start close reads (`OpenWhileMoving`).
+            .add_message::<crate::target::DeselectGuid>()
+            .init_resource::<LootMoveStart>()
+            .init_resource::<LootLatch>()
+            .init_resource::<crate::net::GuidIndex>()
             .init_resource::<LootState>()
             .init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<GroupState>()

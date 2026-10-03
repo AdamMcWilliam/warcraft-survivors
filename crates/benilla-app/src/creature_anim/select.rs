@@ -111,10 +111,13 @@ pub(crate) mod move_flags {
     /// Any horizontal direction bit: the client's `[9e8] & 0xf` gate.
     pub const ANY_MOVE: u32 = FORWARD | BACKWARD | STRAFE_LEFT | STRAFE_RIGHT;
 
+    /// The low byte: forward, back, strafe, turn and pitch, the loot response's test (`0x5ebc40`).
+    pub const STEERING: u32 = 0xff;
+
     /// The bits that get a mover integrated at all, the client's `0x20ff` (`0x616e20`, `0x6166f5`):
     /// without one a mover keeps its last packet's pose, and a flag-less unit is not even in the
     /// mover list (`0x618940`). Swim and the mode bits are not among them.
-    pub const INTEGRATED: u32 = 0xff | FALLING;
+    pub const INTEGRATED: u32 = STEERING | FALLING;
 
     /// The committed-lower-body test routing a one-shot to the masked overlay (`0x5fe6dc`); the
     /// client's separate mouse-turn test (`d58 & 0x1800`) reads a field benilla does not model.
