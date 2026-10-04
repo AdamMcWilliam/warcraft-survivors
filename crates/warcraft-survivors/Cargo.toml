@@ -1,0 +1,24 @@
+[package]
+name = "warcraft-survivors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Warcraft Survivors: the benilla client booted server-less into a top-down survival mode on ten battlegrounds"
+
+[lints]
+workspace = true
+
+[features]
+default = ["dev"]
+dev = ["benilla-app/dev"]
+
+[dependencies]
+benilla-app = { path = "../benilla-app", default-features = false }
+
+[build-dependencies]
+benilla-buildstamp = { path = "../benilla-buildstamp" }
+
+[[bin]]
+name = "warcraft-survivors"
+path = "src/main.rs"
+test = false

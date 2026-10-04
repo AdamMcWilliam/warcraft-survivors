@@ -48,6 +48,11 @@ pub(crate) struct DisplayFacing {
     hist: [f32; 4],
 }
 
+/// A local unit whose facing its own game logic writes every frame: no wire facing exists to swing
+/// it back to, so [`drive_display_facing`] leaves it alone.
+#[derive(Component)]
+pub(crate) struct ScriptedFacing;
+
 /// The signed yaw the facing pump applied this frame (positive turns left), the client's
 /// `0x607ed0` shuffle latch input; removed the frame the body stops moving.
 #[derive(Component)]
@@ -169,7 +174,12 @@ pub(crate) fn drive_display_facing(
     emotes: Option<Res<crate::sound::EmoteSounds>>,
     candidates: Query<
         (Entity, &NetEntity, &ObjectStore),
-        (Without<Spline>, Without<RemoteMotion>, Without<ActiveMover>),
+        (
+            Without<Spline>,
+            Without<RemoteMotion>,
+            Without<ActiveMover>,
+            Without<ScriptedFacing>,
+        ),
     >,
     self_q: Query<Entity, With<SelfPlayer>>,
     mut transforms: Query<&mut Transform>,
@@ -623,6 +633,49 @@ mod tests {
             0,
             "a settled unit must stop dirtying its transform"
         );
+    }
+
+    #[test]
+    fn a_scripted_unit_keeps_the_facing_its_logic_writes() {
+        let mut app = App::new();
+        app.init_resource::<GuidIndex>()
+            .add_systems(Update, drive_display_facing);
+        let mut unit = |scripted: bool| {
+            let mut e = app.world_mut().spawn((
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                ObjectStore::default(),
+                Transform::default(),
+            ));
+            if scripted {
+                e.insert(ScriptedFacing);
+            }
+            e.id()
+        };
+        let (scripted, control) = (unit(true), unit(false));
+        app.update(); // the control's seeding frame
+        for e in [scripted, control] {
+            app.world_mut().get_mut::<Transform>(e).unwrap().rotation =
+                Quat::from_rotation_y(FRAC_PI_2);
+        }
+        for _ in 0..16 {
+            app.update();
+        }
+        let yaw = |e: Entity| yaw_of(app.world().get::<Transform>(e).unwrap().rotation);
+        assert!(
+            yaw(control).abs() <= DEAD_BAND,
+            "the control swings back to its wire facing: {}",
+            yaw(control)
+        );
+        assert!(
+            (yaw(scripted) - FRAC_PI_2).abs() < 1.0e-5,
+            "the scripted unit holds what its logic wrote: {}",
+            yaw(scripted)
+        );
+        assert!(app.world().get::<DisplayFacing>(scripted).is_none());
     }
 
     #[test]

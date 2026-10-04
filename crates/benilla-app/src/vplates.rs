@@ -82,20 +82,20 @@ pub(crate) struct PlateClicks {
 
 /// The plate frame in gx units (`[0x87d9cc]`, `[0x87d9d0]`); child offsets from `0x7cb250` and
 /// `0x7cb6d0`.
-const PLATE_W: f32 = 0.1;
-const PLATE_H: f32 = 0.025;
+pub(crate) const PLATE_W: f32 = 0.1;
+pub(crate) const PLATE_H: f32 = 0.025;
 /// The health bar: BOTTOMLEFT at the plate's BOTTOMLEFT plus the offset.
-const BAR_OFF_X: f32 = 0.0031;
-const BAR_OFF_Y: f32 = 0.003125;
-const BAR_W: f32 = 0.0804;
-const BAR_H: f32 = 0.007025;
+pub(crate) const BAR_OFF_X: f32 = 0.0031;
+pub(crate) const BAR_OFF_Y: f32 = 0.003125;
+pub(crate) const BAR_W: f32 = 0.0804;
+pub(crate) const BAR_H: f32 = 0.007025;
 /// The name's BOTTOM sits at the plate CENTER; the level's CENTER at plate BOTTOMRIGHT plus
 /// (-0.0092, +0.0071); the skull overlays the level. Deviation: `LEVEL_H` is 0.0086, one em under
 /// the reference's 0.009, because the level number read too large.
 const NAME_H: f32 = 0.01;
-const LEVEL_H: f32 = 0.0086;
-const LEVEL_OFF_X: f32 = 0.0092;
-const LEVEL_OFF_Y: f32 = 0.0071;
+pub(crate) const LEVEL_H: f32 = 0.0086;
+pub(crate) const LEVEL_OFF_X: f32 = 0.0092;
+pub(crate) const LEVEL_OFF_Y: f32 = 0.0071;
 const SKULL_SIZE: f32 = 0.01;
 /// The raid-target icon (`0x7cb250`): its RIGHT on the border's LEFT, hanging off the plate's
 /// left edge.
@@ -111,7 +111,7 @@ const DIM_ALPHA: f32 = 178.0 / 255.0;
 /// The bar-fill palette, the dwords at `0xcf60d0`/`e8`/`c8`/`dc`, in sRGB.
 const PLATE_HOSTILE: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 const PLATE_NEUTRAL: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
-const PLATE_FRIENDLY: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+pub(crate) const PLATE_FRIENDLY: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
 const PLATE_PLAYER: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 /// `0x7cbaa0`'s test order: reaction 1 or less red, else a player blue, else 4 or more green,
@@ -131,7 +131,7 @@ fn plate_tint(rank: u8, is_player: bool) -> [f32; 4] {
 /// The level con palette, `0x7cbd50`'s dwords, not FrameXML's `QuestDifficultyColor`.
 const CON_RED: [f32; 4] = [1.0, 25.0 / 255.0, 25.0 / 255.0, 1.0];
 const CON_ORANGE: [f32; 4] = [1.0, 127.0 / 255.0, 63.0 / 255.0, 1.0];
-const CON_YELLOW: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
+pub(crate) const CON_YELLOW: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
 const CON_GREEN: [f32; 4] = [63.0 / 255.0, 178.0 / 255.0, 63.0 / 255.0, 1.0];
 const CON_GRAY: [f32; 4] = [127.0 / 255.0, 127.0 / 255.0, 127.0 / 255.0, 1.0];
 

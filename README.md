@@ -1,117 +1,143 @@
 <div align="center">
-  <h1>benilla</h1>
-  <p><b>A complete World of Warcraft 1.12.1 client, written from scratch in Rust and <a href="https://bevy.org">Bevy</a></b></p>
-  <p>
-    <a href="https://discord.gg/wJSJx467G4"><img src="https://img.shields.io/discord/1529280129518538922?style=for-the-badge&logo=discord&logoColor=white&label=discord&color=5865F2" alt="Discord"></a>
-    <a href="https://www.youtube.com/playlist?list=PLdCnpZNKxyb8"><img src="https://img.shields.io/badge/devlog-youtube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube devlog"></a>
-    <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue?style=for-the-badge" alt="License"></a>
-  </p>
+  <h1>Warcraft Survivors</h1>
+  <p><b>A Vampire Survivors-style roguelite played in the world of World of Warcraft 1.12.1</b></p>
+  <p>Built on <a href="https://github.com/samwhosung/benilla">benilla</a>, a from-scratch 1.12.1 client in Rust and <a href="https://bevy.org">Bevy</a></p>
 </div>
 
-benilla plays the whole game: character creation, questing and professions, dungeons and raids,
-battlegrounds and honor, groups, guilds, trade, mail and the auction house, on the stock 1.12
-interface and with your addons. It connects to a 1.12.1 server over the original protocol and
-reads the game's data from your own 1.12.1 install. Every file format, the network protocol and
-the interface engine are written from scratch, with no original client code, no third-party WoW
-crates and no bundled game assets.
+Pick a class and a hero, pick a battleground, and survive fifteen minutes against an ever-growing
+horde of the zone's own creatures. Your spells cast themselves; you only move. Every level offers
+three cards: a new spell from your class, a higher rank of one you have, or a passive blessing.
+A boss arrives every two and a quarter minutes, and the last of them guards the final stretch.
 
-## What's inside
+Everything on screen is the real game, read at runtime from your own 1.12.1 install: the
+terrain, the creatures and their animations, the spell visuals, the sounds and the interface art.
+This repository ships none of it.
 
-- **Formats:** readers for the whole asset stack (the MPQ patch chain, BLP, DBC, ADT, WDT, WDL, M2
-  and WMO), wired into Bevy as an asset source.
-- **World:** terrain streamed out to the horizon, portal-culled buildings with interior lighting,
-  doodads and ground clutter, swimmable water, sky and weather, and the client's own day/night
-  lighting, fog and gamma.
-- **Models:** GPU-skinned M2s with the full animation controller, particles, ribbons and the spell
-  visuals, and characters end to end: customization, the armor composite, weapons with their
-  enchant glows, forms, stealth and mounts.
-- **Movement:** networked movement in both directions, the server-granted modes from slow fall to
-  roots, a follow camera with collision, boats, zeppelins and taxi flights.
-- **Networking:** SRP6 auth through world-session crypto and the object mirror into the ECS,
-  covering the game from movement and chat through combat, spells, groups and raids, quests,
-  trade, mail, the auction house and battlegrounds.
-- **Interface:** a FrameXML and Lua engine that runs the stock 1.12 interface off your install's
-  patch chain, and third-party 1.12 addons: Questie, pfUI, Bagnon, Bartender2 and most others
-  run. By choice, the options window and the ESC menu follow the Classic Era client's rather than
-  1.12's.
-- **Audio:** music, ambience and effects under the client's own selection and crossfade rules,
-  with interior and underwater transitions and zone reverb.
+## What you need
 
-The format readers and the UI engine core are plain Rust with no Bevy in them, and the world
-renderer runs with no game attached. [`docs/MAP.md`](docs/MAP.md) maps every crate and subsystem,
-generated from the code.
+- **Your own English World of Warcraft 1.12.1 client (build 5875).** Warcraft Survivors only
+  reads it, and never writes to it.
+- **Rust**, from [rustup](https://rustup.rs). The repository pins its toolchain in
+  `rust-toolchain.toml`, so rustup fetches the right version on the first build.
+- **A C compiler**, because the client's Lua is built from source:
+  - Windows: the MSVC build tools, which the Rust installer offers to set up.
+  - macOS: the Xcode command line tools (`xcode-select --install`).
+  - Linux: the ALSA and udev development packages and `pkg-config` (on Debian or Ubuntu,
+    `sudo apt install build-essential pkg-config libasound2-dev libudev-dev`).
 
-## Status
+No server and no account are needed: the mode runs entirely offline.
 
-Complete and fully playable. What is left:
+## Setup
 
-- The long tail of small features that separates a working client from a finished one, tracked
-  as [issues](https://github.com/samwhosung/benilla/issues).
-- Addons, options and performance, ongoing.
+1. Clone this branch:
 
-benilla is a faithful 1.12.1 client and the foundation people build on. There are no prebuilt
-downloads: a packaged build, a particular server's changes or anything 1.12.1 never had belongs
-in a fork, and forks are welcome. GitHub lists
-[every public fork](https://github.com/samwhosung/benilla/forks).
+   ```sh
+   git clone -b survivors https://github.com/AdamMcWilliam/warcraft-survivors.git
+   cd warcraft-survivors
+   ```
 
-Not planned: other expansions or client versions, Warden (anticheat).
+2. Point it at your WoW install, either by linking the install folder as `WoW` at the repo root
+   (the folder that contains `WoW.exe` and `Data`):
 
-## Running it
+   ```powershell
+   # Windows (PowerShell, no admin rights needed)
+   New-Item -ItemType Junction -Path WoW -Target "C:\path\to\WoW"
+   ```
 
-benilla builds and runs on macOS, Linux and Windows. You need:
+   ```sh
+   # macOS / Linux
+   ln -s /path/to/WoW WoW
+   ```
 
-- **An English 1.12.1 client (build 5875)** for the game data. benilla only reads it.
-- **A 1.12.1 server with Warden off.** [vmangos](https://github.com/vmangos/core) is what
-  development runs against, and it ships with Warden off; cMaNGOS and the other 1.12.1 cores speak
-  the same protocol.
-- **Stable Rust and a C compiler**, because the client's Lua is built from source: on macOS the
-  Xcode command line tools, on Linux the ALSA and udev development packages and pkg-config, on
-  Windows the MSVC build tools that the Rust installer sets up.
+   or by setting `WOW_DATA` to the install's `Data` folder each time you run it
+   (`$env:WOW_DATA="C:\path\to\WoW\Data"` in PowerShell, `export WOW_DATA=/path/to/WoW/Data`
+   elsewhere). The `WoW` link is ignored by git, so it never gets committed.
 
-```sh
-WOW_DATA=/path/to/WoW/Data cargo run --release -p benilla
-```
+3. Build and play:
 
-On Windows, in PowerShell:
+   ```sh
+   cargo survivors
+   ```
+
+   That is an alias for `cargo run --profile play -p warcraft-survivors`. The first build
+   compiles the whole engine and takes several minutes; after that it starts in seconds. The
+   built game is `target/play/warcraft-survivors` (`.exe` on Windows), which you can also launch
+   directly or pin as a shortcut.
+
+## How to play
+
+| Input | Does |
+|---|---|
+| `W` `A` `S` `D` or the arrow keys | Move |
+| Mouse wheel | Zoom the camera |
+| Hover a spell or passive icon (top left) | Its tooltip: rank, range, cooldown, what it does now and what the next rank adds |
+| `1` `2` `3` or click | Take a level-up card |
+| `Esc` | Pause and resume |
+| `Enter` | Start the run from the menu, or return to the menu after one |
+
+- **Classes:** Warrior, Paladin, Hunter, Rogue, Priest, Shaman, Mage, Warlock and Druid, each
+  with its own spell pool and the real spell visuals. The heroes on offer are the looks of that
+  class's trainers.
+- **Experience:** slain enemies drop wisps; walk near them to pull them in. Now and then an enemy
+  drops a turkey leg that heals you, and every boss drops one that heals you fully.
+- **Pressure:** the horde grows and toughens over the run, and half way between bosses a ring of
+  enemies closes in from every side.
+- **Victory:** still standing at 15:00.
+
+## Battlegrounds
+
+Each battleground has its own roster that climbs from the zone's weakest creatures to its
+deadliest, and six bosses drawn from the zone and its dungeons and raids. Each is a compact
+arena: an invisible boundary keeps the fight in view.
+
+| Battleground | Zone | The horde | Final boss |
+|---|---|---|---|
+| The Barrens | Kalimdor | Plains beasts, quilboar, centaur and harpies | Hezrul Bloodmark |
+| The Dark Portal | Blasted Lands | Hyenas, scorpids and the Burning Legion | Lord Kazzak |
+| Gates of Ahn'Qiraj | Silithus | The silithid swarm and the Qiraji | Ossirian the Unscarred |
+| Fire Plume Ridge | Un'Goro Crater | Dinosaurs, oozes and fire elementals, beside the lava lake | King Mosh |
+| Gurubashi Arena | Stranglethorn Vale | Jungle beasts and the Gurubashi trolls | Hakkar |
+| Blackrock Mountain | Burning Steppes | The Blackrock orcs, worgs and the black dragonflight | Nefarian |
+| Kodo Graveyard | Desolace | Scorpashi, basilisks, demons and dying kodo | Princess Theradras |
+| Winterspring | Lake Kel'Theril | Owls, chimaeras, Highborne and the blue dragonflight | Azuregos |
+| Mount Hyjal | Kalimdor | The Legion, the Scourge and the dragons of Nightmare | Ysondre |
+| Naxxramas | Eastern Plaguelands | The Scourge of Plaguewood, beneath the necropolis | Kel'Thuzad |
+
+Mount Hyjal is unfinished in 1.12 and has no creatures of its own, so its horde is a themed one.
+
+## For developers
+
+The mode lives in [`crates/benilla-app/src/survivors/`](crates/benilla-app/src/survivors/) (the
+classes, spells, battlegrounds and their rosters are tables in `data.rs`), and its launcher in
+[`crates/warcraft-survivors/`](crates/warcraft-survivors/). It boots the benilla client with no
+server: the hero, the horde and the drops are local entities dressed by the engine's own model,
+animation and spell-visual systems.
+
+A hands-off autopilot plays a run for testing:
 
 ```powershell
-$env:WOW_DATA="C:\path\to\WoW\Data"; cargo run --release -p benilla
+$env:WOW_SURVIVORS_AUTO="Mage"         # a class; add :all for its whole spell pool, :late to start deep into a run, :idle to stand still
+$env:WOW_SURVIVORS_MAP="Naxxramas"     # a battleground, by index (0-9) or part of its name
+$env:WOW_SURVIVORS_SHOTS="C:\shots"    # optional: a screenshot every few seconds
+cargo survivors
 ```
 
-Each release is a tag on the [Releases page](https://github.com/samwhosung/benilla/releases):
-`git checkout <tag>` first runs that release, and `main` is the development tip.
+It logs a line every ten seconds (`survivors auto: ...`). The rest of benilla, the complete 1.12.1
+client, is still here and still builds: see the
+[benilla README](https://github.com/samwhosung/benilla#running-it) and
+[`docs/`](docs/).
 
-`WOW_DATA` names the install's `Data` folder; a link to the install named `WoW` at the repo root
-does the same (`ln -s /path/to/WoW WoW`, or on Windows a junction, which needs no admin rights:
-`New-Item -ItemType Junction -Path WoW -Target C:\path\to\WoW`). The server defaults to
-`localhost:3724`, the stock auth port. Point `WOW_HOST` at another (`WOW_HOST=play.example.com`, or
-`play.example.com:5000` for a remapped port), or set it from the Realmlist button on the login
-screen, which remembers it. Credentials go in at the login screen, or set `WOW_USER` and `WOW_PASS`
-to skip it.
+## Credits and legal
 
-Settings, screenshots and addons live in `benilla-config/` at the repo root: a 1.12 addon goes in
-`benilla-config/AddOns/`. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) has the rest, from the
-player build to the tests.
+Warcraft Survivors is a fork of [benilla](https://github.com/samwhosung/benilla) by its authors,
+which does all the heavy lifting: every file format, the renderer, the animation and spell
+systems, and the interface engine.
 
-## Contributing
-
-Issues and pull requests are open. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) says where to
-start, what gets in, how a change is judged and what happens to a pull request once it is open.
-Bugs, questions and ideas are welcome on the [Discord](https://discord.gg/wJSJx467G4) too.
-
----
-
-Early inspiration and file format guidance came from the
-[wowemulation-dev](https://github.com/wowemulation-dev) community, and
-[warcraft-rs](https://github.com/wowemulation-dev/warcraft-rs) in particular.
-
-benilla is an independent fan project, not affiliated with or endorsed by Blizzard Entertainment.
+This is an independent fan project, not affiliated with or endorsed by Blizzard Entertainment.
 It ships **no Blizzard content**: no art, models, sounds, maps, MPQ contents or FrameXML. You
-provide your own legally obtained 1.12.1 client, and the stock interface runs off its FrameXML at
-runtime. The few files under `crates/benilla-app/assets/ui/` are our own, not copies of it:
-adapters over stock files, and the settings windows and script error log benilla draws itself.
+provide your own legally obtained 1.12.1 client. World of Warcraft and Warcraft are trademarks of
+Blizzard Entertainment, Inc. Vampire Survivors is a trademark of poncle.
 
-World of Warcraft is a trademark of Blizzard Entertainment, Inc. Our own code is licensed under
-[MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option. The two vendored components
-under `third_party/`, the kira audio engine and a Lua 5.1 patched to the 1.12 client's dialect,
-keep their own upstream licenses, alongside each.
+The code is licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option, as
+benilla is. The two vendored components under `third_party/`, the kira audio engine and a Lua 5.1
+patched to the 1.12 client's dialect, keep their own upstream licenses, alongside each.

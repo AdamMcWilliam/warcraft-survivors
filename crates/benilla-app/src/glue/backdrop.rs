@@ -55,7 +55,7 @@ pub(crate) fn split_backdrop_edges(e: usize, strip: &[u8]) -> [Vec<u8>; 8] {
 }
 
 /// Load one edge file and split it; the cell size is the strip's height.
-pub(super) fn backdrop_edges(
+pub(crate) fn backdrop_edges(
     assets: &mut WorldAssets,
     path: &str,
     images: &mut Assets<Image>,
@@ -170,10 +170,13 @@ pub(crate) enum BackdropPiece {
 /// separately, so pieces meeting at a fractional coordinate leave a 1 px slit or a darker overlap.
 pub(crate) fn fit_backdrop_borders(
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    ui_scale: Res<UiScale>,
     mut rigs: Query<(&mut BackdropRig, &ComputedNode, &Children)>,
     mut pieces: Query<(&BackdropPiece, &mut Node, &mut ImageNode)>,
 ) {
-    let s = super::screen_scale(window.single().ok());
+    // The glue screens scale by hand under a unit `UiScale`; a screen laid out on the 768-unit
+    // canvas through `UiScale` (Warcraft Survivors) has the scale in `inv` already.
+    let s = super::screen_scale(window.single().ok()) / ui_scale.0.max(1e-3);
     for (mut rig, computed, children) in &mut rigs {
         let size = computed.size();
         if computed.is_empty() || rig.fitted == (size, s) {

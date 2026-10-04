@@ -287,6 +287,8 @@ fn spawn_slot(
                 // Bone and offset: the prop flexes, so the tips move.
                 top,
                 bottom,
+                pivots: [top.0, bottom.0]
+                    .map(|bone| crate::bowstring::rest_pivot(&dm.skeleton, bone)),
             });
         }
     }

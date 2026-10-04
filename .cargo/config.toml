@@ -3,3 +3,5 @@
 # `release`). Env vars still prefix it: `WOW_USER=<account> WOW_PASS=<password> cargo play`.
 [alias]
 play = "run --profile play -p benilla"
+# `cargo survivors`: Warcraft Survivors, server-less, on the same profile.
+survivors = "run --profile play -p warcraft-survivors"
